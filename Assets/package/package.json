@@ -1,0 +1,11 @@
+{
+  "name": "com.anest.autility",
+  "displayName": "aUtility",
+  "version": "1.0.0",
+  "unity": "6000.0",
+  "description": "ANest Utilities",
+  "author": {
+    "name": "Yukkuri Mikan",
+    "url": "https://github.com/YukkuriMikan/aUtility"
+  }
+}
