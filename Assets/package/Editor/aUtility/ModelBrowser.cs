@@ -1,30 +1,27 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO;
-using System.IO.Compression;
 using System.Text;
 using UnityEditor;
 using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.Universal;
 
-public class ParticlePrefabBrowser : EditorWindow {
+public class ModelBrowser : EditorWindow {
 	private const float CellPadding = 8f;
 	private const float LabelHeight = 32f;
 	private const float MinPreviewSize = 48f;
 	private const float MaxPreviewSize = 512f;
 	private const float GizmoSize = 84f;
 	private const float PreviewSlotSpacing = 2000f;
-	private const string CacheFolderName = "ParticlePrefabBrowserCache";
-	private const string CacheFileName = "particle_prefab_cache.txt";
-	private const string FavoritesFileName = "particle_prefab_favorites.txt";
-	private const string PreviewSizeKey = "ParticlePrefabBrowser.PreviewSize";
-	private const string CameraYawKey = "ParticlePrefabBrowser.CameraYaw";
-	private const string CameraPitchKey = "ParticlePrefabBrowser.CameraPitch";
-	private const string CameraDistanceKey = "ParticlePrefabBrowser.CameraDistance";
-	private const string PlaybackSpeedKey = "ParticlePrefabBrowser.PlaybackSpeed";
-
-	private static readonly Dictionary<Shader, bool> GrabPassShaderCache = new();
+	private const string CacheFolderName = "ModelBrowserCache";
+	private const string CacheFileName = "model_cache.txt";
+	private const string FavoritesFileName = "model_favorites.txt";
+	private const string PreviewSizeKey = "ModelBrowser.PreviewSize";
+	private const string CameraYawKey = "ModelBrowser.CameraYaw";
+	private const string CameraPitchKey = "ModelBrowser.CameraPitch";
+	private const string CameraDistanceKey = "ModelBrowser.CameraDistance";
+	private const string PlaybackSpeedKey = "ModelBrowser.PlaybackSpeed";
 
 	private readonly List<Entry> _entries = new();
 	private readonly List<Entry> _filteredEntries = new();
@@ -33,10 +30,10 @@ public class ParticlePrefabBrowser : EditorWindow {
 	private int _nextPreviewSlot;
 	private readonly HashSet<Entry> _visibleEntries = new();
 	private Vector2 _scrollPosition;
-	private float _previewSize = 72f;
+	private float _previewSize = 128f;
 	private float _cameraYaw;
-	private float _cameraPitch = 8f;
-	private float _cameraDistance = 2.8f;
+	private float _cameraPitch = 15f;
+	private float _cameraDistance = 5.0f;
 	private float _playbackSpeed = 1f;
 	private bool _paused;
 	private string _searchText = string.Empty;
@@ -53,18 +50,18 @@ public class ParticlePrefabBrowser : EditorWindow {
 	private float CellWidth => _previewSize + 32f;
 	private float CellHeight => _previewSize + LabelHeight + (CellPadding * 3f);
 
-	[MenuItem("Tools/Particle Prefab Browser")]
+	[MenuItem("Tools/Model Browser")]
 	private static void OpenWindow() {
-		var window = GetWindow<ParticlePrefabBrowser>("Particle Prefab Browser");
+		var window = GetWindow<ModelBrowser>("Model Browser");
 		window.minSize = new Vector2(480f, 300f);
 		window.LoadFromCache();
 	}
 
 	private void OnEnable() {
-		_previewSize = EditorPrefs.GetFloat(PreviewSizeKey, 72f);
+		_previewSize = EditorPrefs.GetFloat(PreviewSizeKey, 128f);
 		_cameraYaw = EditorPrefs.GetFloat(CameraYawKey, 0f);
-		_cameraPitch = EditorPrefs.GetFloat(CameraPitchKey, 8f);
-		_cameraDistance = EditorPrefs.GetFloat(CameraDistanceKey, 2.8f);
+		_cameraPitch = EditorPrefs.GetFloat(CameraPitchKey, 15f);
+		_cameraDistance = EditorPrefs.GetFloat(CameraDistanceKey, 5.0f);
 		_playbackSpeed = EditorPrefs.GetFloat(PlaybackSpeedKey, 1f);
 		_lastUpdateTime = EditorApplication.timeSinceStartup;
 		LoadFavorites();
@@ -90,20 +87,22 @@ public class ParticlePrefabBrowser : EditorWindow {
 		}
 
 		foreach (var live in _livePreviews.Values) {
-			if (live.Paused) {
+			if (live.Paused || live.Clip == null) {
 				continue;
 			}
 
 			live.Time += deltaTime;
-			if (live.Time >= live.Duration) {
-				live.Time = 0f;
-				foreach (var system in live.Systems) {
-					system.Simulate(0f, false, true);
+			if (live.Time >= live.Clip.length) {
+				if (live.Clip.wrapMode == WrapMode.Loop || live.Clip.isLooping) {
+					live.Time %= live.Clip.length;
+				} else {
+					live.Time = live.Clip.length;
+					live.Paused = true;
 				}
-			} else {
-				foreach (var system in live.Systems) {
-					system.Simulate(deltaTime, false, false);
-				}
+			}
+
+			if (live.Clip != null) {
+				live.Clip.SampleAnimation(live.Instance, live.Time);
 			}
 		}
 
@@ -115,8 +114,7 @@ public class ParticlePrefabBrowser : EditorWindow {
 		UpdateFilter();
 
 		EditorGUILayout.Space(4f);
-		EditorGUILayout.LabelField($"Particle Prefabs: {_filteredEntries.Count} / {_entries.Count}",
-			EditorStyles.boldLabel);
+		EditorGUILayout.LabelField($"Models: {_filteredEntries.Count} / {_entries.Count}", EditorStyles.boldLabel);
 		EditorGUILayout.Space(4f);
 
 		var viewportRect = GUILayoutUtility.GetRect(0f, 100000f, 0f, 100000f, GUILayout.ExpandWidth(true),
@@ -171,22 +169,17 @@ public class ParticlePrefabBrowser : EditorWindow {
 			return;
 		}
 
-		if (string.IsNullOrEmpty(search)) {
-			foreach (var entry in _entries) {
-				if (_favorites.Contains(entry.Guid)) {
-					_filteredEntries.Add(entry);
-				}
-			}
-
-			return;
-		}
-
 		foreach (var entry in _entries) {
 			if (_favoritesOnly && !_favorites.Contains(entry.Guid)) {
 				continue;
 			}
 
-			var name = entry.Prefab != null ? entry.Prefab.name : Path.GetFileNameWithoutExtension(entry.AssetPath);
+			if (string.IsNullOrEmpty(search)) {
+				_filteredEntries.Add(entry);
+				continue;
+			}
+
+			var name = Path.GetFileNameWithoutExtension(entry.AssetPath);
 			if (name.IndexOf(search, StringComparison.OrdinalIgnoreCase) >= 0) {
 				_filteredEntries.Add(entry);
 			}
@@ -211,12 +204,16 @@ public class ParticlePrefabBrowser : EditorWindow {
 
 			GUILayout.Space(8f);
 
-			if (GUILayout.Button("Play", EditorStyles.toolbarButton, GUILayout.Width(50f))) {
+			if (GUILayout.Button("Restart", EditorStyles.toolbarButton, GUILayout.Width(60f))) {
 				RestartAllLivePreviews();
 			}
 
 			if (GUILayout.Button(_paused ? "Resume" : "Pause", EditorStyles.toolbarButton, GUILayout.Width(60f))) {
 				_paused = !_paused;
+			}
+
+			if (GUILayout.Button("Export Favorites", EditorStyles.toolbarButton, GUILayout.Width(110f))) {
+				ExportFavoritesAsPackage();
 			}
 
 			GUILayout.Space(8f);
@@ -229,14 +226,10 @@ public class ParticlePrefabBrowser : EditorWindow {
 				_scrollPosition = Vector2.zero;
 			}
 
-			if (GUILayout.Button("Export ★", EditorStyles.toolbarButton, GUILayout.Width(70f))) {
-				ExportFavoritesAsPackage();
-			}
-
 			GUILayout.FlexibleSpace();
 
 			GUILayout.Label("Speed", EditorStyles.miniLabel);
-			var newSpeed = GUILayout.HorizontalSlider(_playbackSpeed, 0f, 1f, GUILayout.Width(100f));
+			var newSpeed = GUILayout.HorizontalSlider(_playbackSpeed, 0f, 2f, GUILayout.Width(100f));
 			if (!Mathf.Approximately(newSpeed, _playbackSpeed)) {
 				_playbackSpeed = newSpeed;
 				EditorPrefs.SetFloat(PlaybackSpeedKey, _playbackSpeed);
@@ -245,7 +238,7 @@ public class ParticlePrefabBrowser : EditorWindow {
 			GUILayout.Space(8f);
 
 			GUILayout.Label("Distance", EditorStyles.miniLabel);
-			var newDistance = GUILayout.HorizontalSlider(_cameraDistance, 1f, 10f, GUILayout.Width(100f));
+			var newDistance = GUILayout.HorizontalSlider(_cameraDistance, 1f, 20f, GUILayout.Width(100f));
 			if (!Mathf.Approximately(newDistance, _cameraDistance)) {
 				_cameraDistance = newDistance;
 				EditorPrefs.SetFloat(CameraDistanceKey, _cameraDistance);
@@ -263,7 +256,7 @@ public class ParticlePrefabBrowser : EditorWindow {
 		}
 
 		if (_entries.Count == 0) {
-			EditorGUILayout.HelpBox("キャッシュが空です。Rescan を押して一覧を更新してください。", MessageType.Info);
+			EditorGUILayout.HelpBox("キャッシュが空です。Rescan を押して FBX をスキャンしてください。", MessageType.Info);
 		}
 	}
 
@@ -274,14 +267,12 @@ public class ParticlePrefabBrowser : EditorWindow {
 
 	private void HandleCameraGizmoEvents(Rect gizmoRect) {
 		var evt = Event.current;
-		var controlId = GUIUtility.GetControlID("ParticlePrefabBrowserCameraGizmo".GetHashCode(), FocusType.Passive,
-			gizmoRect);
+		var controlId = GUIUtility.GetControlID("ModelBrowserCameraGizmo".GetHashCode(), FocusType.Passive, gizmoRect);
 
 		switch (evt.GetTypeForControl(controlId)) {
 			case EventType.MouseDown:
 				if (evt.button == 0 && gizmoRect.Contains(evt.mousePosition)) {
 					GUIUtility.hotControl = controlId;
-					_draggingGizmo = true;
 					evt.Use();
 				}
 
@@ -289,11 +280,8 @@ public class ParticlePrefabBrowser : EditorWindow {
 			case EventType.MouseDrag:
 				if (GUIUtility.hotControl == controlId) {
 					_cameraYaw += evt.delta.x * 0.75f;
-					if (_cameraYaw > 180f) {
-						_cameraYaw -= 360f;
-					} else if (_cameraYaw < -180f) {
-						_cameraYaw += 360f;
-					}
+					if (_cameraYaw > 180f) _cameraYaw -= 360f;
+					else if (_cameraYaw < -180f) _cameraYaw += 360f;
 
 					_cameraPitch = Mathf.Clamp(_cameraPitch + (evt.delta.y * 0.75f), -89f, 89f);
 					EditorPrefs.SetFloat(CameraYawKey, _cameraYaw);
@@ -306,7 +294,6 @@ public class ParticlePrefabBrowser : EditorWindow {
 			case EventType.MouseUp:
 				if (GUIUtility.hotControl == controlId) {
 					GUIUtility.hotControl = 0;
-					_draggingGizmo = false;
 					evt.Use();
 				}
 
@@ -318,27 +305,22 @@ public class ParticlePrefabBrowser : EditorWindow {
 
 	private void DrawCameraGizmo(Rect viewportRect) {
 		var evt = Event.current;
-		if (evt.type != EventType.Repaint) {
-			return;
-		}
+		if (evt.type != EventType.Repaint) return;
 
 		var gizmoRect = GetCameraGizmoRect(viewportRect);
 		var center = gizmoRect.center;
 		var radius = (GizmoSize * 0.5f) - 6f;
 		var hovered = gizmoRect.Contains(evt.mousePosition);
-		var backgroundColor = _draggingGizmo || hovered
-			? new Color(0f, 0f, 0f, 0.45f)
-			: new Color(0f, 0f, 0f, 0.3f);
+		var dragging = GUIUtility.hotControl != 0 && gizmoRect.Contains(evt.mousePosition); // Simplified check
+		var backgroundColor = dragging || hovered ? new Color(0f, 0f, 0f, 0.45f) : new Color(0f, 0f, 0f, 0.3f);
 
 		Handles.BeginGUI();
 		var previousColor = Handles.color;
-
 		Handles.color = backgroundColor;
 		Handles.DrawSolidDisc(center, Vector3.forward, radius + 4f);
 		Handles.color = new Color(1f, 1f, 1f, 0.25f);
 		Handles.DrawWireDisc(center, Vector3.forward, radius + 4f);
 
-		// Draw axis directions as seen from the current camera orientation.
 		var cameraRotation = Quaternion.Euler(_cameraPitch, _cameraYaw, 0f);
 		var viewRotation = Quaternion.Inverse(cameraRotation);
 		DrawGizmoAxis(center, radius, viewRotation * Vector3.right, new Color(0.9f, 0.3f, 0.3f, 1f), "X");
@@ -350,14 +332,11 @@ public class ParticlePrefabBrowser : EditorWindow {
 	}
 
 	private static void DrawGizmoAxis(Vector2 center, float radius, Vector3 direction, Color color, string label) {
-		// GUI space has Y pointing down, so flip the Y component.
 		var end = center + (new Vector2(direction.x, -direction.y) * radius);
 		var isFront = direction.z <= 0f;
-
 		Handles.color = isFront ? color : new Color(color.r, color.g, color.b, 0.35f);
 		Handles.DrawAAPolyLine(2f, center, end);
 		Handles.DrawSolidDisc(end, Vector3.forward, 5f);
-
 		var labelStyle = new GUIStyle(EditorStyles.miniBoldLabel) {
 			alignment = TextAnchor.MiddleCenter,
 			normal = { textColor = Color.black }
@@ -376,27 +355,19 @@ public class ParticlePrefabBrowser : EditorWindow {
 
 		if (Event.current.type == EventType.Repaint) {
 			_visibleEntries.Add(entry);
-
 			var liveTexture = RenderLivePreview(entry, previewRect);
 			if (liveTexture != null) {
 				GUI.DrawTexture(previewRect, liveTexture, ScaleMode.StretchToFill, false);
 			} else {
 				var preview = GetPreview(entry);
-				if (preview != null) {
-					GUI.DrawTexture(previewRect, preview, ScaleMode.ScaleToFit);
-				} else if (entry.PreviewFailed) {
-					var placeholderStyle = new GUIStyle(EditorStyles.miniLabel) {
-						alignment = TextAnchor.MiddleCenter,
-						wordWrap = true,
-						clipping = TextClipping.Clip,
-						normal = { textColor = new Color(0.75f, 0.75f, 0.75f, 1f) }
-					};
-
-					EditorGUI.LabelField(previewRect, "No Preview", placeholderStyle);
-				}
+				if (preview != null) GUI.DrawTexture(previewRect, preview, ScaleMode.ScaleToFit);
+				else if (entry.PreviewFailed)
+					EditorGUI.LabelField(previewRect, "No Preview",
+						new GUIStyle(EditorStyles.miniLabel) { alignment = TextAnchor.MiddleCenter });
 			}
 		}
 
+		HandleDragAndDrop(previewRect, entry);
 		DrawEntryPlaybackButtons(previewRect, entry);
 		DrawEntryFavoriteButton(previewRect, entry);
 
@@ -407,8 +378,9 @@ public class ParticlePrefabBrowser : EditorWindow {
 		}
 
 		if (GUI.Button(previewRect, GUIContent.none, GUIStyle.none)) {
-			Selection.activeObject = entry.Prefab;
-			EditorGUIUtility.PingObject(entry.Prefab);
+			var obj = AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(entry.AssetPath);
+			Selection.activeObject = obj;
+			EditorGUIUtility.PingObject(obj);
 		}
 
 		var labelRect = new Rect(cellRect.x + CellPadding, previewRect.yMax + CellPadding,
@@ -419,8 +391,51 @@ public class ParticlePrefabBrowser : EditorWindow {
 			clipping = TextClipping.Clip
 		};
 
-		var label = entry.Prefab != null ? entry.Prefab.name : Path.GetFileNameWithoutExtension(entry.AssetPath);
+		var label = Path.GetFileNameWithoutExtension(entry.AssetPath);
 		EditorGUI.LabelField(labelRect, label, labelStyle);
+
+		_livePreviews.TryGetValue(entry, out var live);
+		if (live != null && live.Clip != null) {
+			var animLabelRect = new Rect(labelRect.x, labelRect.yMax, labelRect.width, 16f);
+			EditorGUI.LabelField(animLabelRect, $"[{live.Clip.name}]",
+				new GUIStyle(EditorStyles.miniLabel)
+					{ alignment = TextAnchor.UpperCenter, normal = { textColor = Color.cyan } });
+		}
+	}
+
+	private void HandleDragAndDrop(Rect rect, Entry entry) {
+		var evt = Event.current;
+		if (!rect.Contains(evt.mousePosition)) return;
+
+		switch (evt.type) {
+			case EventType.DragUpdated:
+			case EventType.DragPerform:
+				var clip = GetDroppedClip(DragAndDrop.objectReferences);
+				if (clip != null) {
+					DragAndDrop.visualMode = DragAndDropVisualMode.Copy;
+					if (evt.type == EventType.DragPerform) {
+						DragAndDrop.AcceptDrag();
+						var live = GetOrCreateLivePreview(entry);
+						if (live != null) {
+							live.Clip = clip;
+							live.Time = 0f;
+							live.Paused = false;
+						}
+					}
+
+					evt.Use();
+				}
+
+				break;
+		}
+	}
+
+	private AnimationClip GetDroppedClip(UnityEngine.Object[] objects) {
+		foreach (var obj in objects) {
+			if (obj is AnimationClip clip) return clip;
+		}
+
+		return null;
 	}
 
 	private void DrawEntryPlaybackButtons(Rect previewRect, Entry entry) {
@@ -429,21 +444,15 @@ public class ParticlePrefabBrowser : EditorWindow {
 		var pauseRect = new Rect(playRect.xMax + 2f, playRect.y, buttonSize, buttonSize);
 
 		_livePreviews.TryGetValue(entry, out var live);
+		if (live == null || live.Clip == null) return;
 
 		if (GUI.Button(playRect, "▶", EditorStyles.miniButton)) {
-			live ??= GetOrCreateLivePreview(entry);
-			if (live != null) {
-				RestartLivePreview(live);
-				live.Paused = false;
-			}
+			live.Time = 0f;
+			live.Paused = false;
 		}
 
-		var paused = live != null && live.Paused;
-		if (GUI.Button(pauseRect, paused ? "‖▶" : "‖", EditorStyles.miniButton)) {
-			live ??= GetOrCreateLivePreview(entry);
-			if (live != null) {
-				live.Paused = !live.Paused;
-			}
+		if (GUI.Button(pauseRect, live.Paused ? "‖▶" : "‖", EditorStyles.miniButton)) {
+			live.Paused = !live.Paused;
 		}
 	}
 
@@ -451,86 +460,55 @@ public class ParticlePrefabBrowser : EditorWindow {
 		const float buttonSize = 18f;
 		var favoriteRect = new Rect(previewRect.xMax - buttonSize - 2f, previewRect.y + 2f, buttonSize, buttonSize);
 		var isFavorite = _favorites.Contains(entry.Guid);
-
 		var style = new GUIStyle(EditorStyles.miniButton) {
 			normal = { textColor = isFavorite ? new Color(1f, 0.8f, 0.1f, 1f) : new Color(0.6f, 0.6f, 0.6f, 1f) }
 		};
 
 		if (GUI.Button(favoriteRect, isFavorite ? "★" : "☆", style)) {
-			if (isFavorite) {
-				_favorites.Remove(entry.Guid);
-			} else {
-				_favorites.Add(entry.Guid);
-			}
-
+			if (isFavorite) _favorites.Remove(entry.Guid);
+			else _favorites.Add(entry.Guid);
 			SaveFavorites();
-			if (_favoritesOnly) {
-				_filterDirty = true;
-			}
+			if (_favoritesOnly) _filterDirty = true;
 		}
 	}
 
 	private void RestartAllLivePreviews() {
 		_paused = false;
 		foreach (var live in _livePreviews.Values) {
-			RestartLivePreview(live);
+			live.Time = 0f;
 			live.Paused = false;
 		}
 
 		Repaint();
 	}
 
-	private static void RestartLivePreview(LivePreview live) {
-		live.Time = 0f;
-		foreach (var system in live.Systems) {
-			system.Simulate(0f, false, true);
-		}
-	}
-
 	private static void ShowEntryContextMenu(Entry entry) {
 		var menu = new GenericMenu();
 		menu.AddItem(new GUIContent("Export as Asset Package..."), false, () => ExportEntryAsPackage(entry));
+		menu.AddItem(new GUIContent("Export All Favorites..."), false, () => {
+			var window = GetWindow<ModelBrowser>();
+			if (window != null) {
+				window.ExportFavoritesAsPackage();
+			}
+		});
 		menu.ShowAsContext();
-	}
-
-	private static void ExportEntryAsPackage(Entry entry) {
-		if (entry.Prefab == null) {
-			return;
-		}
-
-		var prefabName = Path.GetFileNameWithoutExtension(entry.AssetPath);
-		var savePath = EditorUtility.SaveFilePanel("Export Particle Prefab Package", string.Empty,
-			prefabName + ".unitypackage", "unitypackage");
-		if (string.IsNullOrEmpty(savePath)) {
-			return;
-		}
-
-		try {
-			var exports = CollectExports(entry.AssetPath, prefabName);
-			WriteUnityPackage(savePath, exports);
-			EditorUtility.RevealInFinder(savePath);
-			Debug.Log($"Exported {exports.Count} assets to {savePath}");
-		} catch (Exception exception) {
-			Debug.LogError($"Failed to export package: {exception}");
-			EditorUtility.DisplayDialog("Export Failed", exception.Message, "OK");
-		}
 	}
 
 	private void ExportFavoritesAsPackage() {
 		var favoriteEntries = new List<Entry>();
 		foreach (var entry in _entries) {
-			if (_favorites.Contains(entry.Guid) && entry.Prefab != null) {
+			if (_favorites.Contains(entry.Guid)) {
 				favoriteEntries.Add(entry);
 			}
 		}
 
 		if (favoriteEntries.Count == 0) {
-			EditorUtility.DisplayDialog("Export Favorites", "お気に入りに登録されたプレハブがありません。", "OK");
+			EditorUtility.DisplayDialog("Export Favorites", "お気に入りに登録されたモデルがありません。", "OK");
 			return;
 		}
 
-		var savePath = EditorUtility.SaveFilePanel("Export Favorite Particle Prefabs", string.Empty,
-			"ParticleFavorites.unitypackage", "unitypackage");
+		var savePath = EditorUtility.SaveFilePanel("Export Favorite Models", string.Empty,
+			"ModelFavorites.unitypackage", "unitypackage");
 		if (string.IsNullOrEmpty(savePath)) {
 			return;
 		}
@@ -539,7 +517,7 @@ public class ParticlePrefabBrowser : EditorWindow {
 			var exports = CollectFavoriteExports(favoriteEntries);
 			WriteUnityPackage(savePath, exports);
 			EditorUtility.RevealInFinder(savePath);
-			Debug.Log($"Exported {exports.Count} assets ({favoriteEntries.Count} prefabs) to {savePath}");
+			Debug.Log($"Exported {exports.Count} assets ({favoriteEntries.Count} models) to {savePath}");
 		} catch (Exception exception) {
 			Debug.LogError($"Failed to export favorites package: {exception}");
 			EditorUtility.DisplayDialog("Export Failed", exception.Message, "OK");
@@ -550,7 +528,7 @@ public class ParticlePrefabBrowser : EditorWindow {
 		var exports = new List<ExportAsset>();
 		var usedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-		// Count how many favorite prefabs reference each dependency to detect shared assets.
+		// Count how many favorite models reference each dependency to detect shared assets.
 		var dependencyOwners = new Dictionary<string, List<Entry>>(StringComparer.OrdinalIgnoreCase);
 		var rootPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 		foreach (var entry in favoriteEntries) {
@@ -575,7 +553,7 @@ public class ParticlePrefabBrowser : EditorWindow {
 			}
 		}
 
-		// Favorite prefab roots go into their own folders.
+		// Favorite model roots go into their own folders.
 		foreach (var entry in favoriteEntries) {
 			var guid = AssetDatabase.AssetPathToGUID(entry.AssetPath);
 			if (string.IsNullOrEmpty(guid) || !File.Exists(entry.AssetPath)) {
@@ -583,7 +561,8 @@ public class ParticlePrefabBrowser : EditorWindow {
 			}
 
 			var folderName = SanitizeFileName(Path.GetFileNameWithoutExtension(entry.AssetPath));
-			var targetPath = MakeUniquePath($"Assets/{folderName}/{Path.GetFileName(entry.AssetPath)}", usedPaths);
+			var targetPath = MakeUniquePath($"ExportedModel/{folderName}/{Path.GetFileName(entry.AssetPath)}",
+				usedPaths);
 			exports.Add(new ExportAsset {
 				Guid = guid,
 				SourcePath = entry.AssetPath,
@@ -602,12 +581,12 @@ public class ParticlePrefabBrowser : EditorWindow {
 			var fileName = Path.GetFileName(dependency);
 			string targetPath;
 			if (owners.Count > 1) {
-				// Shared by multiple favorite prefabs: place under Common.
-				targetPath = $"Assets/Common/{ClassifyCommonDependency(dependency)}/{fileName}";
+				// Shared by multiple favorite models: place under Common.
+				targetPath = $"ExportedModel/Common/{ClassifyCommonDependency(dependency)}/{fileName}";
 			} else {
 				var owner = owners[0];
 				var folderName = SanitizeFileName(Path.GetFileNameWithoutExtension(owner.AssetPath));
-				targetPath = $"Assets/{folderName}/{ClassifyDependency(dependency)}/{fileName}";
+				targetPath = $"ExportedModel/{folderName}/{ClassifyDependency(dependency)}/{fileName}";
 			}
 
 			targetPath = MakeUniquePath(targetPath, usedPaths);
@@ -623,16 +602,35 @@ public class ParticlePrefabBrowser : EditorWindow {
 
 	private static string ClassifyCommonDependency(string assetPath) {
 		var category = ClassifyDependency(assetPath);
-		return category == "DependencyPrefabs" ? "Others" : category;
+		return category == "Models" ? "Others" : category;
 	}
 
-	private static List<ExportAsset> CollectExports(string prefabPath, string prefabName) {
-		var folderName = SanitizeFileName(prefabName);
-		var rootFolder = $"Assets/{folderName}";
+	private static void ExportEntryAsPackage(Entry entry) {
+		var modelName = Path.GetFileNameWithoutExtension(entry.AssetPath);
+		var savePath = EditorUtility.SaveFilePanel("Export Model Package", string.Empty,
+			modelName + ".unitypackage", "unitypackage");
+		if (string.IsNullOrEmpty(savePath)) {
+			return;
+		}
+
+		try {
+			var exports = CollectExports(entry.AssetPath, modelName);
+			WriteUnityPackage(savePath, exports);
+			EditorUtility.RevealInFinder(savePath);
+			Debug.Log($"Exported {exports.Count} assets to {savePath}");
+		} catch (Exception exception) {
+			Debug.LogError($"Failed to export package: {exception}");
+			EditorUtility.DisplayDialog("Export Failed", exception.Message, "OK");
+		}
+	}
+
+	private static List<ExportAsset> CollectExports(string modelPath, string modelName) {
+		var folderName = SanitizeFileName(modelName);
+		var rootFolder = $"ExportedModel/{folderName}";
 		var exports = new List<ExportAsset>();
 		var usedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-		var dependencies = AssetDatabase.GetDependencies(prefabPath, true);
+		var dependencies = AssetDatabase.GetDependencies(modelPath, true);
 		foreach (var dependency in dependencies) {
 			if (!dependency.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase)) {
 				continue;
@@ -645,7 +643,7 @@ public class ParticlePrefabBrowser : EditorWindow {
 
 			var fileName = Path.GetFileName(dependency);
 			string targetPath;
-			if (string.Equals(dependency, prefabPath, StringComparison.OrdinalIgnoreCase)) {
+			if (string.Equals(dependency, modelPath, StringComparison.OrdinalIgnoreCase)) {
 				targetPath = $"{rootFolder}/{fileName}";
 			} else {
 				targetPath = $"{rootFolder}/{ClassifyDependency(dependency)}/{fileName}";
@@ -664,16 +662,25 @@ public class ParticlePrefabBrowser : EditorWindow {
 
 	private static string ClassifyDependency(string assetPath) {
 		if (assetPath.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase)) {
-			return "DependencyPrefabs";
+			return "Prefabs";
 		}
 
 		if (assetPath.EndsWith(".mat", StringComparison.OrdinalIgnoreCase)) {
 			return "Materials";
 		}
 
+		if (assetPath.EndsWith(".fbx", StringComparison.OrdinalIgnoreCase) ||
+		    assetPath.EndsWith(".obj", StringComparison.OrdinalIgnoreCase)) {
+			return "Models";
+		}
+
 		var mainType = AssetDatabase.GetMainAssetTypeAtPath(assetPath);
 		if (mainType != null && typeof(Texture).IsAssignableFrom(mainType)) {
 			return "Textures";
+		}
+
+		if (mainType != null && typeof(AnimationClip).IsAssignableFrom(mainType)) {
+			return "Animations";
 		}
 
 		return "Others";
@@ -707,7 +714,8 @@ public class ParticlePrefabBrowser : EditorWindow {
 
 	private static void WriteUnityPackage(string savePath, List<ExportAsset> exports) {
 		using var fileStream = new FileStream(savePath, FileMode.Create, FileAccess.Write);
-		using var gzipStream = new GZipStream(fileStream, System.IO.Compression.CompressionLevel.Optimal);
+		using var gzipStream =
+			new System.IO.Compression.GZipStream(fileStream, System.IO.Compression.CompressionLevel.Optimal);
 
 		foreach (var export in exports) {
 			var assetBytes = File.ReadAllBytes(export.SourcePath);
@@ -767,10 +775,7 @@ public class ParticlePrefabBrowser : EditorWindow {
 	}
 
 	private void EnsurePreviewUtility() {
-		if (_previewUtility != null) {
-			return;
-		}
-
+		if (_previewUtility != null) return;
 		_previewUtility = new PreviewRenderUtility();
 		_previewUtility.camera.fieldOfView = 30f;
 		_previewUtility.camera.nearClipPlane = 0.01f;
@@ -789,128 +794,36 @@ public class ParticlePrefabBrowser : EditorWindow {
 	}
 
 	private LivePreview GetOrCreateLivePreview(Entry entry) {
-		if (_livePreviews.TryGetValue(entry, out var live)) {
-			return live;
-		}
+		if (_livePreviews.TryGetValue(entry, out var live)) return live;
 
-		if (entry.Prefab == null) {
-			return null;
-		}
+		var model = AssetDatabase.LoadAssetAtPath<GameObject>(entry.AssetPath);
+		if (model == null) return null;
 
 		EnsurePreviewUtility();
+		var instance = _previewUtility.InstantiatePrefabInScene(model);
+		if (instance == null) return null;
 
-		var instance = _previewUtility.InstantiatePrefabInScene(entry.Prefab);
-		if (instance == null) {
-			return null;
-		}
-
-		// Give each live preview a unique, far-apart origin. All instances share the same
-		// preview scene, so overlapping positions would leak other prefabs into the render.
 		var slot = _freePreviewSlots.Count > 0 ? _freePreviewSlots.Dequeue() : _nextPreviewSlot++;
 		var origin = new Vector3(((slot % 64) - 32) * PreviewSlotSpacing, 0f, ((slot / 64) - 32) * PreviewSlotSpacing);
 		instance.transform.position = origin;
-		var useBuiltinPipeline = UsesBuiltinOnlyShader(instance);
-		DisableGrabPassRenderers(instance);
-
-		var systems = instance.GetComponentsInChildren<ParticleSystem>(true);
-		var duration = 1f;
-		foreach (var system in systems) {
-			system.Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
-			if (system.useAutoRandomSeed) {
-				system.useAutoRandomSeed = false;
-			}
-
-			duration = Mathf.Max(duration, system.main.duration);
-			system.Simulate(0f, false, true);
-		}
 
 		live = new LivePreview {
 			Instance = instance,
-			Systems = systems,
-			Duration = duration,
-			UseBuiltinPipeline = useBuiltinPipeline,
 			Slot = slot,
-			Origin = origin
+			Origin = origin,
+			Animator = instance.GetComponent<Animator>()
 		};
+		if (live.Animator != null) {
+			live.Animator.enabled = false;
+		}
 
 		_livePreviews.Add(entry, live);
-
 		return live;
-	}
-
-	private static bool UsesBuiltinOnlyShader(GameObject instance) {
-		if (GraphicsSettings.currentRenderPipeline == null) {
-			return false;
-		}
-
-		foreach (var renderer in instance.GetComponentsInChildren<Renderer>(true)) {
-			foreach (var material in renderer.sharedMaterials) {
-				if (material == null || material.shader == null) {
-					continue;
-				}
-
-				if (IsBuiltinOnlyShader(material.shader)) {
-					return true;
-				}
-			}
-		}
-
-		return false;
-	}
-
-	private static bool IsBuiltinOnlyShader(Shader shader) {
-		var name = shader.name;
-		return name.StartsWith("Legacy Shaders/", StringComparison.Ordinal) ||
-		       name.StartsWith("Particles/", StringComparison.Ordinal) ||
-		       name.StartsWith("Mobile/Particles/", StringComparison.Ordinal) ||
-		       name.StartsWith("Mobile/", StringComparison.Ordinal) && name.Contains("Particle");
-	}
-
-	private static void DisableGrabPassRenderers(GameObject instance) {
-		if (GraphicsSettings.currentRenderPipeline == null) {
-			return;
-		}
-
-		foreach (var renderer in instance.GetComponentsInChildren<Renderer>(true)) {
-			foreach (var material in renderer.sharedMaterials) {
-				if (material != null && UsesGrabPass(material.shader)) {
-					renderer.enabled = false;
-					break;
-				}
-			}
-		}
-	}
-
-	private static bool UsesGrabPass(Shader shader) {
-		if (shader == null) {
-			return false;
-		}
-
-		if (GrabPassShaderCache.TryGetValue(shader, out var uses)) {
-			return uses;
-		}
-
-		uses = false;
-		var path = AssetDatabase.GetAssetPath(shader);
-		if (!string.IsNullOrEmpty(path) && path.EndsWith(".shader", StringComparison.OrdinalIgnoreCase) &&
-		    File.Exists(path)) {
-			try {
-				uses = File.ReadAllText(path).Contains("GrabPass");
-			} catch (Exception) {
-				uses = false;
-			}
-		}
-
-		GrabPassShaderCache.Add(shader, uses);
-
-		return uses;
 	}
 
 	private Texture RenderLivePreview(Entry entry, Rect rect) {
 		var live = GetOrCreateLivePreview(entry);
-		if (live == null || live.Systems.Length == 0) {
-			return null;
-		}
+		if (live == null) return null;
 
 		var bounds = new Bounds(live.Origin, Vector3.one);
 		var hasBounds = false;
@@ -918,9 +831,7 @@ public class ParticlePrefabBrowser : EditorWindow {
 			if (!hasBounds) {
 				bounds = renderer.bounds;
 				hasBounds = true;
-			} else {
-				bounds.Encapsulate(renderer.bounds);
-			}
+			} else bounds.Encapsulate(renderer.bounds);
 		}
 
 		var radius = Mathf.Max(0.5f, bounds.extents.magnitude);
@@ -933,7 +844,7 @@ public class ParticlePrefabBrowser : EditorWindow {
 		previewCamera.transform.position = bounds.center + offset;
 		previewCamera.transform.LookAt(bounds.center);
 
-		var useSrp = GraphicsSettings.currentRenderPipeline != null && !live.UseBuiltinPipeline;
+		var useSrp = GraphicsSettings.currentRenderPipeline != null;
 		var previousSrpFlag = Unsupported.useScriptableRenderPipeline;
 		var previousAsyncCompilation = ShaderUtil.allowAsyncCompilation;
 		Unsupported.useScriptableRenderPipeline = useSrp;
@@ -957,26 +868,19 @@ public class ParticlePrefabBrowser : EditorWindow {
 			}
 		}
 
-		if (toRelease == null) {
-			return;
-		}
-
-		foreach (var entry in toRelease) {
-			var live = _livePreviews[entry];
-			if (live.Instance != null) {
-				DestroyImmediate(live.Instance);
+		if (toRelease != null) {
+			foreach (var entry in toRelease) {
+				var live = _livePreviews[entry];
+				if (live.Instance != null) DestroyImmediate(live.Instance);
+				_freePreviewSlots.Enqueue(live.Slot);
+				_livePreviews.Remove(entry);
 			}
-
-			_freePreviewSlots.Enqueue(live.Slot);
-			_livePreviews.Remove(entry);
 		}
 	}
 
 	private void ReleaseAllLivePreviews() {
 		foreach (var live in _livePreviews.Values) {
-			if (live.Instance != null) {
-				DestroyImmediate(live.Instance);
-			}
+			if (live.Instance != null) DestroyImmediate(live.Instance);
 		}
 
 		_livePreviews.Clear();
@@ -985,30 +889,22 @@ public class ParticlePrefabBrowser : EditorWindow {
 	}
 
 	private Texture2D GetPreview(Entry entry) {
-		if (entry.Preview != null) {
-			return entry.Preview;
-		}
+		if (entry.Preview != null) return entry.Preview;
+		if (entry.PreviewFailed) return null;
 
-		if (entry.PreviewFailed) {
-			return null;
-		}
-
-		var preview = AssetPreview.GetAssetPreview(entry.Prefab);
+		var obj = AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(entry.AssetPath);
+		var preview = AssetPreview.GetAssetPreview(obj);
 		if (preview != null) {
 			entry.Preview = preview;
-			entry.PreviewRequested = true;
-			entry.PreviewFailed = false;
 			return entry.Preview;
 		}
 
-		entry.PreviewRequested = true;
-		if (AssetPreview.IsLoadingAssetPreview(entry.Prefab.GetInstanceID())) {
+		if (AssetPreview.IsLoadingAssetPreview(obj.GetInstanceID())) {
 			Repaint();
 			return null;
 		}
 
 		entry.PreviewFailed = true;
-
 		return null;
 	}
 
@@ -1017,19 +913,11 @@ public class ParticlePrefabBrowser : EditorWindow {
 		_entries.Clear();
 		_filterDirty = true;
 
-		var prefabGuids = AssetDatabase.FindAssets("t:Prefab");
-		foreach (var guid in prefabGuids) {
+		var guids = AssetDatabase.FindAssets("t:Model");
+		foreach (var guid in guids) {
 			var path = AssetDatabase.GUIDToAssetPath(guid);
-			if (!ContainsParticleSystem(path)) {
-				continue;
-			}
-
-			var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(path);
-			if (prefab == null) {
-				continue;
-			}
-
-			_entries.Add(new Entry(prefab, path));
+			if (string.IsNullOrEmpty(path)) continue;
+			_entries.Add(new Entry(path));
 			cache.Guids.Add(guid);
 		}
 
@@ -1040,29 +928,14 @@ public class ParticlePrefabBrowser : EditorWindow {
 	private void LoadFromCache() {
 		_entries.Clear();
 		_filterDirty = true;
-
 		var cacheFilePath = GetCacheFilePath();
-		if (string.IsNullOrEmpty(cacheFilePath) || !File.Exists(cacheFilePath)) {
-			return;
-		}
+		if (string.IsNullOrEmpty(cacheFilePath) || !File.Exists(cacheFilePath)) return;
 
-		var guids = File.ReadAllLines(cacheFilePath);
-		foreach (var guid in guids) {
-			if (string.IsNullOrEmpty(guid)) {
-				continue;
-			}
-
+		foreach (var guid in File.ReadAllLines(cacheFilePath)) {
+			if (string.IsNullOrEmpty(guid)) continue;
 			var path = AssetDatabase.GUIDToAssetPath(guid);
-			if (string.IsNullOrEmpty(path)) {
-				continue;
-			}
-
-			var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(path);
-			if (prefab == null) {
-				continue;
-			}
-
-			_entries.Add(new Entry(prefab, path));
+			if (string.IsNullOrEmpty(path)) continue;
+			_entries.Add(new Entry(path));
 		}
 
 		_entries.Sort((a, b) => string.Compare(a.AssetPath, b.AssetPath, StringComparison.OrdinalIgnoreCase));
@@ -1070,106 +943,61 @@ public class ParticlePrefabBrowser : EditorWindow {
 
 	private static void SaveCache(CacheData cache) {
 		var cacheFilePath = GetCacheFilePath();
-		if (string.IsNullOrEmpty(cacheFilePath)) {
-			return;
-		}
-
+		if (string.IsNullOrEmpty(cacheFilePath)) return;
 		Directory.CreateDirectory(Path.GetDirectoryName(cacheFilePath));
 		File.WriteAllLines(cacheFilePath, cache.Guids);
 	}
 
 	private void LoadFavorites() {
 		_favorites.Clear();
-
 		var favoritesFilePath = GetFavoritesFilePath();
-		if (string.IsNullOrEmpty(favoritesFilePath) || !File.Exists(favoritesFilePath)) {
-			return;
-		}
-
+		if (string.IsNullOrEmpty(favoritesFilePath) || !File.Exists(favoritesFilePath)) return;
 		foreach (var guid in File.ReadAllLines(favoritesFilePath)) {
-			if (!string.IsNullOrEmpty(guid)) {
-				_favorites.Add(guid);
-			}
+			if (!string.IsNullOrEmpty(guid)) _favorites.Add(guid);
 		}
 	}
 
 	private void SaveFavorites() {
 		var favoritesFilePath = GetFavoritesFilePath();
-		if (string.IsNullOrEmpty(favoritesFilePath)) {
-			return;
-		}
-
+		if (string.IsNullOrEmpty(favoritesFilePath)) return;
 		Directory.CreateDirectory(Path.GetDirectoryName(favoritesFilePath));
 		File.WriteAllLines(favoritesFilePath, _favorites);
 	}
 
 	private static string GetFavoritesFilePath() {
-		if (_favoritesFilePath != null) {
-			return _favoritesFilePath;
-		}
-
+		if (_favoritesFilePath != null) return _favoritesFilePath;
 		var cacheFilePath = GetCacheFilePath();
-		if (string.IsNullOrEmpty(cacheFilePath)) {
-			return null;
-		}
-
+		if (string.IsNullOrEmpty(cacheFilePath)) return null;
 		_favoritesFilePath = Path.Combine(Path.GetDirectoryName(cacheFilePath) ?? "Assets", FavoritesFileName);
 		return _favoritesFilePath;
 	}
 
 	private static string GetCacheFilePath() {
-		if (_cacheFilePath != null) {
-			return _cacheFilePath;
-		}
-
-		var scriptGuids = AssetDatabase.FindAssets($"{nameof(ParticlePrefabBrowser)} t:MonoScript");
-		foreach (var guid in scriptGuids) {
-			var path = AssetDatabase.GUIDToAssetPath(guid);
-			if (Path.GetFileNameWithoutExtension(path) != nameof(ParticlePrefabBrowser)) {
-				continue;
-			}
-
-			var scriptDirectory = Path.GetDirectoryName(path);
-			_cacheFilePath = Path.Combine(scriptDirectory ?? "Assets", CacheFolderName, CacheFileName);
-			return _cacheFilePath;
-		}
-
-		return null;
-	}
-
-	private static bool ContainsParticleSystem(string assetPath) {
-		var prefabRoot = PrefabUtility.LoadPrefabContents(assetPath);
-		try {
-			return prefabRoot != null && prefabRoot.GetComponentInChildren<ParticleSystem>(true) != null;
-		} finally {
-			if (prefabRoot != null) {
-				PrefabUtility.UnloadPrefabContents(prefabRoot);
-			}
-		}
+		if (_cacheFilePath != null) return _cacheFilePath;
+		var projectRoot = Path.GetDirectoryName(Application.dataPath);
+		if (projectRoot == null) return null;
+		_cacheFilePath = Path.Combine(projectRoot, "Library", CacheFolderName, CacheFileName);
+		return _cacheFilePath;
 	}
 
 	private class LivePreview {
 		public GameObject Instance;
-		public ParticleSystem[] Systems;
-		public float Duration;
+		public Animator Animator;
+		public AnimationClip Clip;
 		public float Time;
 		public float Radius;
-		public bool UseBuiltinPipeline;
 		public bool Paused;
 		public int Slot;
 		public Vector3 Origin;
 	}
 
 	private class Entry {
-		public readonly GameObject Prefab;
 		public readonly string AssetPath;
 		public readonly string Guid;
 		public Texture2D Preview;
-		public bool PreviewRequested;
 		public bool PreviewFailed;
 
-		public Entry(GameObject prefab, string assetPath) {
-			Prefab = prefab;
+		public Entry(string assetPath) {
 			AssetPath = assetPath;
 			Guid = AssetDatabase.AssetPathToGUID(assetPath);
 		}
