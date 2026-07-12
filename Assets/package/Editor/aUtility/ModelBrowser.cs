@@ -22,6 +22,15 @@ public class ModelBrowser : EditorWindow {
 	private const string CameraPitchKey = "ModelBrowser.CameraPitch";
 	private const string CameraDistanceKey = "ModelBrowser.CameraDistance";
 	private const string PlaybackSpeedKey = "ModelBrowser.PlaybackSpeed";
+	private const string ShowFbxKey = "ModelBrowser.ShowFbx";
+	private const string ShowMeshPrefabKey = "ModelBrowser.ShowMeshPrefab";
+	private const string ShowSkinnedMeshPrefabKey = "ModelBrowser.ShowSkinnedMeshPrefab";
+
+	private enum AssetType {
+		Fbx,
+		MeshPrefab,
+		SkinnedMeshPrefab
+	}
 
 	private readonly List<Entry> _entries = new();
 	private readonly List<Entry> _filteredEntries = new();
@@ -37,6 +46,9 @@ public class ModelBrowser : EditorWindow {
 	private float _playbackSpeed = 1f;
 	private bool _paused;
 	private string _searchText = string.Empty;
+	private bool _showFbx = true;
+	private bool _showMeshPrefab = true;
+	private bool _showSkinnedMeshPrefab = true;
 	private bool _filterDirty = true;
 	private bool _favoritesOnly;
 	private readonly HashSet<string> _favorites = new(StringComparer.Ordinal);
@@ -63,6 +75,9 @@ public class ModelBrowser : EditorWindow {
 		_cameraPitch = EditorPrefs.GetFloat(CameraPitchKey, 15f);
 		_cameraDistance = EditorPrefs.GetFloat(CameraDistanceKey, 5.0f);
 		_playbackSpeed = EditorPrefs.GetFloat(PlaybackSpeedKey, 1f);
+		_showFbx = EditorPrefs.GetBool(ShowFbxKey, true);
+		_showMeshPrefab = EditorPrefs.GetBool(ShowMeshPrefabKey, true);
+		_showSkinnedMeshPrefab = EditorPrefs.GetBool(ShowSkinnedMeshPrefabKey, true);
 		_lastUpdateTime = EditorApplication.timeSinceStartup;
 		LoadFavorites();
 		LoadFromCache();
@@ -164,15 +179,15 @@ public class ModelBrowser : EditorWindow {
 		_filteredEntries.Clear();
 
 		var search = _searchText?.Trim();
-		if (string.IsNullOrEmpty(search) && !_favoritesOnly) {
-			_filteredEntries.AddRange(_entries);
-			return;
-		}
 
 		foreach (var entry in _entries) {
 			if (_favoritesOnly && !_favorites.Contains(entry.Guid)) {
 				continue;
 			}
+
+			if (!_showFbx && entry.Type == AssetType.Fbx) continue;
+			if (!_showMeshPrefab && entry.Type == AssetType.MeshPrefab) continue;
+			if (!_showSkinnedMeshPrefab && entry.Type == AssetType.SkinnedMeshPrefab) continue;
 
 			if (string.IsNullOrEmpty(search)) {
 				_filteredEntries.Add(entry);
@@ -226,6 +241,30 @@ public class ModelBrowser : EditorWindow {
 				_scrollPosition = Vector2.zero;
 			}
 
+			GUILayout.Space(8f);
+
+			var newFbx = GUILayout.Toggle(_showFbx, "FBX", EditorStyles.toolbarButton, GUILayout.Width(40f));
+			if (newFbx != _showFbx) {
+				_showFbx = newFbx;
+				EditorPrefs.SetBool(ShowFbxKey, _showFbx);
+				_filterDirty = true;
+			}
+
+			var newMesh = GUILayout.Toggle(_showMeshPrefab, "Mesh", EditorStyles.toolbarButton, GUILayout.Width(50f));
+			if (newMesh != _showMeshPrefab) {
+				_showMeshPrefab = newMesh;
+				EditorPrefs.SetBool(ShowMeshPrefabKey, _showMeshPrefab);
+				_filterDirty = true;
+			}
+
+			var newSkinned = GUILayout.Toggle(_showSkinnedMeshPrefab, "Skinned", EditorStyles.toolbarButton,
+				GUILayout.Width(60f));
+			if (newSkinned != _showSkinnedMeshPrefab) {
+				_showSkinnedMeshPrefab = newSkinned;
+				EditorPrefs.SetBool(ShowSkinnedMeshPrefabKey, _showSkinnedMeshPrefab);
+				_filterDirty = true;
+			}
+
 			GUILayout.FlexibleSpace();
 
 			GUILayout.Label("Speed", EditorStyles.miniLabel);
@@ -256,7 +295,7 @@ public class ModelBrowser : EditorWindow {
 		}
 
 		if (_entries.Count == 0) {
-			EditorGUILayout.HelpBox("キャッシュが空です。Rescan を押して FBX をスキャンしてください。", MessageType.Info);
+			EditorGUILayout.HelpBox("キャッシュが空です。Rescan を押して FBX/Prefab をスキャンしてください。", MessageType.Info);
 		}
 	}
 
@@ -913,12 +952,31 @@ public class ModelBrowser : EditorWindow {
 		_entries.Clear();
 		_filterDirty = true;
 
-		var guids = AssetDatabase.FindAssets("t:Model");
-		foreach (var guid in guids) {
+		// Scan Models (FBX)
+		var modelGuids = AssetDatabase.FindAssets("t:Model");
+		foreach (var guid in modelGuids) {
 			var path = AssetDatabase.GUIDToAssetPath(guid);
 			if (string.IsNullOrEmpty(path)) continue;
-			_entries.Add(new Entry(path));
+			_entries.Add(new Entry(path, AssetType.Fbx));
 			cache.Guids.Add(guid);
+		}
+
+		// Scan Prefabs
+		var prefabGuids = AssetDatabase.FindAssets("t:Prefab");
+		foreach (var guid in prefabGuids) {
+			var path = AssetDatabase.GUIDToAssetPath(guid);
+			if (string.IsNullOrEmpty(path)) continue;
+
+			var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(path);
+			if (prefab == null) continue;
+
+			if (prefab.GetComponentInChildren<SkinnedMeshRenderer>(true) != null) {
+				_entries.Add(new Entry(path, AssetType.SkinnedMeshPrefab));
+				cache.Guids.Add(guid);
+			} else if (prefab.GetComponentInChildren<MeshRenderer>(true) != null) {
+				_entries.Add(new Entry(path, AssetType.MeshPrefab));
+				cache.Guids.Add(guid);
+			}
 		}
 
 		_entries.Sort((a, b) => string.Compare(a.AssetPath, b.AssetPath, StringComparison.OrdinalIgnoreCase));
@@ -935,7 +993,25 @@ public class ModelBrowser : EditorWindow {
 			if (string.IsNullOrEmpty(guid)) continue;
 			var path = AssetDatabase.GUIDToAssetPath(guid);
 			if (string.IsNullOrEmpty(path)) continue;
-			_entries.Add(new Entry(path));
+
+			var type = AssetType.Fbx;
+			if (path.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase)) {
+				var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(path);
+				if (prefab != null) {
+					if (prefab.GetComponentInChildren<SkinnedMeshRenderer>(true) != null) {
+						type = AssetType.SkinnedMeshPrefab;
+					} else if (prefab.GetComponentInChildren<MeshRenderer>(true) != null) {
+						type = AssetType.MeshPrefab;
+					} else {
+						// Not a mesh prefab, skip
+						continue;
+					}
+				} else {
+					continue;
+				}
+			}
+
+			_entries.Add(new Entry(path, type));
 		}
 
 		_entries.Sort((a, b) => string.Compare(a.AssetPath, b.AssetPath, StringComparison.OrdinalIgnoreCase));
@@ -994,12 +1070,14 @@ public class ModelBrowser : EditorWindow {
 	private class Entry {
 		public readonly string AssetPath;
 		public readonly string Guid;
+		public readonly AssetType Type;
 		public Texture2D Preview;
 		public bool PreviewFailed;
 
-		public Entry(string assetPath) {
+		public Entry(string assetPath, AssetType type) {
 			AssetPath = assetPath;
 			Guid = AssetDatabase.AssetPathToGUID(assetPath);
+			Type = type;
 		}
 	}
 
