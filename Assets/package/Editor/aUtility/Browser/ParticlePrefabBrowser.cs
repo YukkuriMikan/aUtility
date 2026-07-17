@@ -5,7 +5,8 @@ using UnityEditor;
 using UnityEngine;
 using UnityEngine.Rendering;
 
-public class ParticlePrefabBrowser : AssetBrowserWindow<ParticlePrefabBrowser.Entry, ParticlePrefabBrowser.LivePreview> {
+public class
+	ParticlePrefabBrowser : AssetBrowserWindow<ParticlePrefabBrowser.Entry, ParticlePrefabBrowser.LivePreview> {
 	private const string CacheFolderName = "ParticlePrefabBrowserCache";
 	private const string CacheFileName = "particle_prefab_cache.txt";
 	private const string FavoritesFileName = "particle_prefab_favorites.txt";
