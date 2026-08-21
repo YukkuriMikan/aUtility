@@ -84,6 +84,9 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	protected virtual void HandleEntryDragAndDrop(Rect previewRect, TEntry entry) { }
 	protected virtual void DrawEntryExtraLabel(Rect labelRect, TEntry entry) { }
 	protected virtual void AddContextMenuItems(GenericMenu menu, TEntry entry) { }
+	protected virtual bool KeepInvisibleLivePreviews => false;
+	protected virtual void UpdateBackgroundWork() { }
+	protected virtual void OnEntriesChanged() { }
 
 	protected virtual void OnEnable() {
 		_previewSize = EditorPrefs.GetFloat(PrefsKeyPrefix + ".PreviewSize", DefaultPreviewSize);
@@ -107,6 +110,8 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	}
 
 	private void Update() {
+		UpdateBackgroundWork();
+
 		var now = EditorApplication.timeSinceStartup;
 		var deltaTime = Mathf.Clamp((float)(now - _lastUpdateTime), 0f, 0.1f) * _playbackSpeed;
 		_lastUpdateTime = now;
@@ -790,6 +795,10 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	}
 
 	private void ReleaseInvisibleLivePreviews() {
+		if (KeepInvisibleLivePreviews) {
+			return;
+		}
+
 		List<TEntry> toRelease = null;
 		foreach (var pair in _livePreviews) {
 			if (!_visibleEntries.Contains(pair.Key)) {
@@ -813,7 +822,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		}
 	}
 
-	private void ReleaseAllLivePreviews() {
+	protected void ReleaseAllLivePreviews() {
 		foreach (var live in _livePreviews.Values) {
 			if (live.Instance != null) {
 				DestroyImmediate(live.Instance);
@@ -858,6 +867,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 
 	protected void Refresh() {
 		var cacheGuids = new List<string>();
+		ReleaseAllLivePreviews();
 		_entries.Clear();
 		_filterDirty = true;
 
@@ -865,14 +875,17 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 
 		_entries.Sort((a, b) => string.Compare(a.AssetPath, b.AssetPath, StringComparison.OrdinalIgnoreCase));
 		SaveCache(cacheGuids);
+		OnEntriesChanged();
 	}
 
 	protected void LoadFromCache() {
+		ReleaseAllLivePreviews();
 		_entries.Clear();
 		_filterDirty = true;
 
 		var cacheFilePath = CacheFilePath;
 		if (string.IsNullOrEmpty(cacheFilePath) || !File.Exists(cacheFilePath)) {
+			OnEntriesChanged();
 			return;
 		}
 
@@ -893,6 +906,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		}
 
 		_entries.Sort((a, b) => string.Compare(a.AssetPath, b.AssetPath, StringComparison.OrdinalIgnoreCase));
+		OnEntriesChanged();
 	}
 
 	private void SaveCache(List<string> cacheGuids) {

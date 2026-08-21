@@ -11,6 +11,7 @@ public class ModelBrowser : AssetBrowserWindow<ModelBrowser.Entry, ModelBrowser.
 	private const string ShowFbxKey = "ModelBrowser.ShowFbx";
 	private const string ShowMeshPrefabKey = "ModelBrowser.ShowMeshPrefab";
 	private const string ShowSkinnedMeshPrefabKey = "ModelBrowser.ShowSkinnedMeshPrefab";
+	private const string PreloadKey = "ModelBrowser.Preload";
 
 	public enum AssetType {
 		Fbx,
@@ -21,6 +22,8 @@ public class ModelBrowser : AssetBrowserWindow<ModelBrowser.Entry, ModelBrowser.
 	private bool _showFbx = true;
 	private bool _showMeshPrefab = true;
 	private bool _showSkinnedMeshPrefab = true;
+	private bool _preloadEnabled;
+	private int _preloadIndex;
 	private static string _cacheFilePath;
 	private static string _favoritesFilePath;
 
@@ -50,6 +53,7 @@ public class ModelBrowser : AssetBrowserWindow<ModelBrowser.Entry, ModelBrowser.
 		_showFbx = EditorPrefs.GetBool(ShowFbxKey, true);
 		_showMeshPrefab = EditorPrefs.GetBool(ShowMeshPrefabKey, true);
 		_showSkinnedMeshPrefab = EditorPrefs.GetBool(ShowSkinnedMeshPrefabKey, true);
+		_preloadEnabled = EditorPrefs.GetBool(PreloadKey, false);
 		base.OnEnable();
 	}
 
@@ -57,6 +61,43 @@ public class ModelBrowser : AssetBrowserWindow<ModelBrowser.Entry, ModelBrowser.
 		if (GUILayout.Button("Export Favorites", EditorStyles.toolbarButton, GUILayout.Width(110f))) {
 			ExportFavoritesAsPackage();
 		}
+
+		var preloadLabel = !_preloadEnabled
+			? "Preload OFF"
+			: _preloadIndex < _entries.Count
+				? $"Preload {_preloadIndex}/{_entries.Count}"
+				: "Preload ON";
+		var preloadContent = new GUIContent(preloadLabel,
+			"ON: 全モデルのプレビューを段階的に生成し、メモリに保持します。スクロールは軽くなりますが、メモリ使用量が増えます。");
+		var newPreloadEnabled = GUILayout.Toggle(_preloadEnabled, preloadContent, EditorStyles.toolbarButton,
+			GUILayout.Width(110f));
+		if (newPreloadEnabled != _preloadEnabled) {
+			_preloadEnabled = newPreloadEnabled;
+			EditorPrefs.SetBool(PreloadKey, _preloadEnabled);
+			_preloadIndex = 0;
+			if (!_preloadEnabled) {
+				ReleaseAllLivePreviews();
+			}
+
+			Repaint();
+		}
+	}
+
+	protected override bool KeepInvisibleLivePreviews => _preloadEnabled;
+
+	protected override void UpdateBackgroundWork() {
+		if (!_preloadEnabled || _preloadIndex >= _entries.Count || EditorApplication.isCompiling ||
+		    EditorApplication.isUpdating) {
+			return;
+		}
+
+		GetOrCreateLivePreview(_entries[_preloadIndex]);
+		_preloadIndex++;
+		Repaint();
+	}
+
+	protected override void OnEntriesChanged() {
+		_preloadIndex = 0;
 	}
 
 	protected override void DrawExtraToolbarFilters() {
@@ -241,6 +282,7 @@ public class ModelBrowser : AssetBrowserWindow<ModelBrowser.Entry, ModelBrowser.
 		foreach (var guid in modelGuids) {
 			var path = AssetDatabase.GUIDToAssetPath(guid);
 			if (string.IsNullOrEmpty(path)) continue;
+			if (!ContainsMesh(path)) continue;
 			entries.Add(new Entry(path, AssetType.Fbx));
 			cacheGuids.Add(guid);
 		}
@@ -280,9 +322,23 @@ public class ModelBrowser : AssetBrowserWindow<ModelBrowser.Entry, ModelBrowser.
 				// Not a mesh prefab, skip
 				return null;
 			}
+		} else if (!ContainsMesh(path)) {
+			// Animation-only FBX and other model assets without meshes are not previewable.
+			return null;
 		}
 
 		return new Entry(path, type);
+	}
+
+	private static bool ContainsMesh(string assetPath) {
+		var assets = AssetDatabase.LoadAllAssetsAtPath(assetPath);
+		foreach (var asset in assets) {
+			if (asset is Mesh) {
+				return true;
+			}
+		}
+
+		return false;
 	}
 
 	protected override string CacheFilePath {
