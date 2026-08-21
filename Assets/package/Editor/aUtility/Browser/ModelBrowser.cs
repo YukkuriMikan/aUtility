@@ -58,7 +58,14 @@ public class ModelBrowser : AssetBrowserWindow<ModelBrowser.Entry, ModelBrowser.
 	}
 
 	protected override void DrawExtraToolbarButtons() {
-		if (GUILayout.Button("Export Favorites", EditorStyles.toolbarButton, GUILayout.Width(110f))) {
+		if (GUILayout.Button(GetToolbarContent("ScreenShot", "Camera Icon",
+			    "表示中のモデルを画像として保存します。"), EditorStyles.toolbarButton, GUILayout.Width(105f))) {
+			ModelBrowserScreenshotWindow.Open(this);
+		}
+
+		if (GUILayout.Button(GetToolbarContent("Export Favorites", "SaveAs",
+			    "お気に入りのモデルをUnityパッケージとして書き出します。"), EditorStyles.toolbarButton,
+		    GUILayout.Width(125f))) {
 			ExportFavoritesAsPackage();
 		}
 
@@ -67,7 +74,7 @@ public class ModelBrowser : AssetBrowserWindow<ModelBrowser.Entry, ModelBrowser.
 			: _preloadIndex < _entries.Count
 				? $"Preload {_preloadIndex}/{_entries.Count}"
 				: "Preload ON";
-		var preloadContent = new GUIContent(preloadLabel,
+		var preloadContent = GetToolbarContent(preloadLabel, "Profiler.Memory",
 			"ON: 全モデルのプレビューを段階的に生成し、メモリに保持します。スクロールは軽くなりますが、メモリ使用量が増えます。");
 		var newPreloadEnabled = GUILayout.Toggle(_preloadEnabled, preloadContent, EditorStyles.toolbarButton,
 			GUILayout.Width(110f));
@@ -100,25 +107,115 @@ public class ModelBrowser : AssetBrowserWindow<ModelBrowser.Entry, ModelBrowser.
 		_preloadIndex = 0;
 	}
 
+	internal int ScreenshotItemCount => GetFilteredEntryCount();
+
+	internal void SaveScreenshots(string outputFolder, int width, int height,
+		ModelBrowserScreenshotFormat imageFormat) {
+		var entries = GetFilteredEntriesSnapshot();
+		if (entries.Count == 0) {
+			EditorUtility.DisplayDialog("ScreenShot", "保存対象のモデルがありません。", "OK");
+			return;
+		}
+
+		var extension = imageFormat == ModelBrowserScreenshotFormat.Png ? ".png" : ".jpg";
+		var usedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+		var savedCount = 0;
+		var failedCount = 0;
+		var canceled = false;
+		try {
+			for (var index = 0; index < entries.Count; index++) {
+				var entry = entries[index];
+				canceled = EditorUtility.DisplayCancelableProgressBar("Saving Screenshots",
+					$"{GetEntryName(entry)} ({index + 1}/{entries.Count})", (float)index / entries.Count);
+				if (canceled) {
+					break;
+				}
+
+				var wasLoaded = _livePreviews.ContainsKey(entry);
+				Texture2D screenshot = null;
+				try {
+					screenshot = CaptureEntryScreenshot(entry, width, height);
+					if (screenshot == null) {
+						failedCount++;
+						continue;
+					}
+
+					var bytes = imageFormat == ModelBrowserScreenshotFormat.Png
+						? screenshot.EncodeToPNG()
+						: screenshot.EncodeToJPG(95);
+					var fileName = SanitizeFileName(GetEntryName(entry));
+					var outputPath = GetUniqueScreenshotPath(outputFolder, fileName, extension, usedPaths);
+					File.WriteAllBytes(outputPath, bytes);
+					savedCount++;
+				} catch (Exception exception) {
+					failedCount++;
+					Debug.LogError($"Failed to save screenshot for {entry.AssetPath}: {exception}");
+				} finally {
+					if (screenshot != null) {
+						DestroyImmediate(screenshot);
+					}
+
+					if (!wasLoaded && !_preloadEnabled) {
+						ReleaseLivePreview(entry);
+					}
+				}
+			}
+		} finally {
+			EditorUtility.ClearProgressBar();
+			Repaint();
+		}
+
+		if (savedCount > 0) {
+			EditorUtility.RevealInFinder(outputFolder);
+		}
+
+		var result = canceled ? $"キャンセルしました。\n保存: {savedCount} 件" : $"保存: {savedCount} 件";
+		if (failedCount > 0) {
+			result += $"\n失敗: {failedCount} 件";
+		}
+
+		EditorUtility.DisplayDialog("ScreenShot", result, "OK");
+	}
+
+	private static string GetUniqueScreenshotPath(string outputFolder, string fileName, string extension,
+		HashSet<string> usedPaths) {
+		var path = Path.Combine(outputFolder, fileName + extension);
+		if (!File.Exists(path) && usedPaths.Add(path)) {
+			return path;
+		}
+
+		for (var index = 1;; index++) {
+			path = Path.Combine(outputFolder, $"{fileName} {index}{extension}");
+			if (!File.Exists(path) && usedPaths.Add(path)) {
+				return path;
+			}
+		}
+	}
+
 	protected override void DrawExtraToolbarFilters() {
 		GUILayout.Space(8f);
 
-		var newFbx = GUILayout.Toggle(_showFbx, "FBX", EditorStyles.toolbarButton, GUILayout.Width(40f));
+		var newFbx = GUILayout.Toggle(_showFbx,
+			GetToolbarContent("FBX", "ModelImporter Icon", "FBXモデルを表示します。"),
+			EditorStyles.toolbarButton, GUILayout.Width(55f));
 		if (newFbx != _showFbx) {
 			_showFbx = newFbx;
 			EditorPrefs.SetBool(ShowFbxKey, _showFbx);
 			_filterDirty = true;
 		}
 
-		var newMesh = GUILayout.Toggle(_showMeshPrefab, "Mesh", EditorStyles.toolbarButton, GUILayout.Width(50f));
+		var newMesh = GUILayout.Toggle(_showMeshPrefab,
+			GetToolbarContent("Mesh", "Mesh Icon", "MeshRendererを含むPrefabを表示します。"),
+			EditorStyles.toolbarButton, GUILayout.Width(65f));
 		if (newMesh != _showMeshPrefab) {
 			_showMeshPrefab = newMesh;
 			EditorPrefs.SetBool(ShowMeshPrefabKey, _showMeshPrefab);
 			_filterDirty = true;
 		}
 
-		var newSkinned = GUILayout.Toggle(_showSkinnedMeshPrefab, "Skinned", EditorStyles.toolbarButton,
-			GUILayout.Width(60f));
+		var newSkinned = GUILayout.Toggle(_showSkinnedMeshPrefab,
+			GetToolbarContent("Skinned", "SkinnedMeshRenderer Icon", "SkinnedMeshRendererを含むPrefabを表示します。"),
+			EditorStyles.toolbarButton, GUILayout.Width(80f));
 		if (newSkinned != _showSkinnedMeshPrefab) {
 			_showSkinnedMeshPrefab = newSkinned;
 			EditorPrefs.SetBool(ShowSkinnedMeshPrefabKey, _showSkinnedMeshPrefab);
@@ -371,6 +468,78 @@ public class ModelBrowser : AssetBrowserWindow<ModelBrowser.Entry, ModelBrowser.
 
 		public Entry(string assetPath, AssetType type) : base(assetPath) {
 			Type = type;
+		}
+	}
+}
+
+public enum ModelBrowserScreenshotFormat {
+	Png,
+	Jpg
+}
+
+public class ModelBrowserScreenshotWindow : EditorWindow {
+	private const string WidthKey = "ModelBrowser.Screenshot.Width";
+	private const string HeightKey = "ModelBrowser.Screenshot.Height";
+	private const string FormatKey = "ModelBrowser.Screenshot.Format";
+	private const int MinImageSize = 16;
+	private const int MaxImageSize = 8192;
+
+	private static readonly string[] FormatLabels = { "PNG", "JPG" };
+
+	private ModelBrowser _owner;
+	private int _width = 512;
+	private int _height = 512;
+	private ModelBrowserScreenshotFormat _imageFormat = ModelBrowserScreenshotFormat.Png;
+
+	public static void Open(ModelBrowser owner) {
+		var window = CreateInstance<ModelBrowserScreenshotWindow>();
+		window._owner = owner;
+		window._width = Mathf.Clamp(EditorPrefs.GetInt(WidthKey, 512), MinImageSize, MaxImageSize);
+		window._height = Mathf.Clamp(EditorPrefs.GetInt(HeightKey, 512), MinImageSize, MaxImageSize);
+		window._imageFormat = (ModelBrowserScreenshotFormat)Mathf.Clamp(EditorPrefs.GetInt(FormatKey, 0), 0,
+			FormatLabels.Length - 1);
+		window.titleContent = new GUIContent("ScreenShot");
+
+		var size = new Vector2(320f, 150f);
+		var center = owner != null
+			? owner.position.center
+			: new Vector2(Screen.currentResolution.width * 0.5f, Screen.currentResolution.height * 0.5f);
+		window.position = new Rect(center.x - (size.x * 0.5f), center.y - (size.y * 0.5f), size.x, size.y);
+		window.minSize = size;
+		window.maxSize = size;
+		window.ShowUtility();
+		window.Focus();
+	}
+
+	private void OnGUI() {
+		EditorGUILayout.Space(8f);
+
+		EditorGUI.BeginChangeCheck();
+		_width = Mathf.Clamp(EditorGUILayout.DelayedIntField("Width", _width), MinImageSize, MaxImageSize);
+		_height = Mathf.Clamp(EditorGUILayout.DelayedIntField("Height", _height), MinImageSize, MaxImageSize);
+		_imageFormat = (ModelBrowserScreenshotFormat)EditorGUILayout.Popup("Image Format", (int)_imageFormat,
+			FormatLabels);
+		if (EditorGUI.EndChangeCheck()) {
+			EditorPrefs.SetInt(WidthKey, _width);
+			EditorPrefs.SetInt(HeightKey, _height);
+			EditorPrefs.SetInt(FormatKey, (int)_imageFormat);
+		}
+
+		EditorGUILayout.Space(4f);
+		if (_owner == null) {
+			EditorGUILayout.HelpBox("Model Browser が閉じられています。", MessageType.Warning);
+			return;
+		}
+
+		EditorGUILayout.LabelField($"保存対象: {_owner.ScreenshotItemCount} 件", EditorStyles.miniLabel);
+		EditorGUILayout.Space(4f);
+
+		if (GUILayout.Button("保存", GUILayout.Height(24f))) {
+			var outputFolder = EditorUtility.OpenFolderPanel("スクリーンショットの保存先", string.Empty,
+				string.Empty);
+			if (!string.IsNullOrEmpty(outputFolder)) {
+				_owner.SaveScreenshots(outputFolder, _width, _height, _imageFormat);
+			}
 		}
 	}
 }

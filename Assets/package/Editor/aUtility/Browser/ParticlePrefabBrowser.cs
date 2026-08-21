@@ -38,7 +38,9 @@ public class
 	}
 
 	protected override void DrawExtraToolbarFilters() {
-		if (GUILayout.Button("Export ★", EditorStyles.toolbarButton, GUILayout.Width(70f))) {
+		if (GUILayout.Button(GetToolbarContent("Export ★", "SaveAs",
+			    "お気に入りのパーティクルPrefabをUnityパッケージとして書き出します。"),
+		    EditorStyles.toolbarButton, GUILayout.Width(85f))) {
 			ExportFavoritesAsPackage();
 		}
 	}

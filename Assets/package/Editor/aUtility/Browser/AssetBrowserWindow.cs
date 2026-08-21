@@ -43,6 +43,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	protected readonly HashSet<string> _favorites = new(StringComparer.Ordinal);
 	protected readonly Dictionary<string, List<string>> _entryTags = new(StringComparer.Ordinal);
 	protected PreviewRenderUtility _previewUtility;
+	private static readonly Dictionary<string, Texture2D> ToolbarIconCache = new(StringComparer.Ordinal);
 	private double _lastUpdateTime;
 	protected bool _draggingGizmo;
 
@@ -221,7 +222,8 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 
 	private void DrawToolbar() {
 		using (new EditorGUILayout.HorizontalScope(EditorStyles.toolbar)) {
-			if (GUILayout.Button("Rescan", EditorStyles.toolbarButton, GUILayout.Width(90f))) {
+			if (GUILayout.Button(GetToolbarContent("Rescan", "Refresh", "アセット一覧を再スキャンします。"),
+			    EditorStyles.toolbarButton, GUILayout.Width(90f))) {
 				Refresh();
 			}
 
@@ -237,11 +239,15 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 
 			GUILayout.Space(8f);
 
-			if (GUILayout.Button(RestartButtonLabel, EditorStyles.toolbarButton, GUILayout.Width(60f))) {
+			if (GUILayout.Button(GetToolbarContent(RestartButtonLabel, "PlayButton",
+				    "すべてのプレビューを先頭から再生します。"), EditorStyles.toolbarButton, GUILayout.Width(70f))) {
 				RestartAllLivePreviews();
 			}
 
-			if (GUILayout.Button(_paused ? "Resume" : "Pause", EditorStyles.toolbarButton, GUILayout.Width(60f))) {
+			var pauseContent = _paused
+				? GetToolbarContent("Resume", "PlayButton", "プレビューの再生を再開します。")
+				: GetToolbarContent("Pause", "PauseButton", "プレビューの再生を一時停止します。");
+			if (GUILayout.Button(pauseContent, EditorStyles.toolbarButton, GUILayout.Width(70f))) {
 				_paused = !_paused;
 			}
 
@@ -249,8 +255,10 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 
 			GUILayout.Space(8f);
 
-			var newFavoritesOnly = GUILayout.Toggle(_favoritesOnly, "★ Favorites", EditorStyles.toolbarButton,
-				GUILayout.Width(80f));
+			var favoritesContent = GetToolbarContent("Favorites", "Favorite",
+				"お気に入りに登録したアセットだけを表示します。");
+			var newFavoritesOnly = GUILayout.Toggle(_favoritesOnly, favoritesContent, EditorStyles.toolbarButton,
+				GUILayout.Width(90f));
 			if (newFavoritesOnly != _favoritesOnly) {
 				_favoritesOnly = newFavoritesOnly;
 				_filterDirty = true;
@@ -306,7 +314,10 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 
 		switch (evt.GetTypeForControl(controlId)) {
 			case EventType.MouseDown:
-				if (evt.button == 0 && gizmoRect.Contains(evt.mousePosition)) {
+				if (evt.button == 2 && gizmoRect.Contains(evt.mousePosition)) {
+					ResetCameraView();
+					evt.Use();
+				} else if (evt.button == 0 && gizmoRect.Contains(evt.mousePosition)) {
 					GUIUtility.hotControl = controlId;
 					_draggingGizmo = true;
 					evt.Use();
@@ -341,6 +352,16 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		}
 
 		EditorGUIUtility.AddCursorRect(gizmoRect, MouseCursor.Orbit);
+	}
+
+	private void ResetCameraView() {
+		_cameraYaw = 0f;
+		_cameraPitch = DefaultCameraPitch;
+		_cameraDistance = DefaultCameraDistance;
+		EditorPrefs.SetFloat(PrefsKeyPrefix + ".CameraYaw", _cameraYaw);
+		EditorPrefs.SetFloat(PrefsKeyPrefix + ".CameraPitch", _cameraPitch);
+		EditorPrefs.SetFloat(PrefsKeyPrefix + ".CameraDistance", _cameraDistance);
+		Repaint();
 	}
 
 	private void DrawCameraGizmo(Rect viewportRect) {
@@ -812,14 +833,21 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		}
 
 		foreach (var entry in toRelease) {
-			var live = _livePreviews[entry];
-			if (live.Instance != null) {
-				DestroyImmediate(live.Instance);
-			}
-
-			_freePreviewSlots.Enqueue(live.Slot);
-			_livePreviews.Remove(entry);
+			ReleaseLivePreview(entry);
 		}
+	}
+
+	protected void ReleaseLivePreview(TEntry entry) {
+		if (!_livePreviews.TryGetValue(entry, out var live)) {
+			return;
+		}
+
+		if (live.Instance != null) {
+			DestroyImmediate(live.Instance);
+		}
+
+		_freePreviewSlots.Enqueue(live.Slot);
+		_livePreviews.Remove(entry);
 	}
 
 	protected void ReleaseAllLivePreviews() {
@@ -865,6 +893,45 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		return null;
 	}
 
+	protected List<TEntry> GetFilteredEntriesSnapshot() {
+		UpdateFilter();
+		return new List<TEntry>(_filteredEntries);
+	}
+
+	protected int GetFilteredEntryCount() {
+		UpdateFilter();
+		return _filteredEntries.Count;
+	}
+
+	protected Texture2D CaptureEntryScreenshot(TEntry entry, int width, int height) {
+		var source = RenderLivePreview(entry, new Rect(0f, 0f, width, height));
+		if (source == null) {
+			return null;
+		}
+
+		var target = RenderTexture.GetTemporary(width, height, 0, RenderTextureFormat.ARGB32,
+			RenderTextureReadWrite.sRGB);
+		var previousActive = RenderTexture.active;
+		Texture2D screenshot = null;
+		try {
+			Graphics.Blit(source, target);
+			RenderTexture.active = target;
+			screenshot = new Texture2D(width, height, TextureFormat.RGB24, false);
+			screenshot.ReadPixels(new Rect(0f, 0f, width, height), 0, 0, false);
+			screenshot.Apply(false, false);
+			return screenshot;
+		} catch {
+			if (screenshot != null) {
+				DestroyImmediate(screenshot);
+			}
+
+			throw;
+		} finally {
+			RenderTexture.active = previousActive;
+			RenderTexture.ReleaseTemporary(target);
+		}
+	}
+
 	protected void Refresh() {
 		var cacheGuids = new List<string>();
 		ReleaseAllLivePreviews();
@@ -876,6 +943,15 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		_entries.Sort((a, b) => string.Compare(a.AssetPath, b.AssetPath, StringComparison.OrdinalIgnoreCase));
 		SaveCache(cacheGuids);
 		OnEntriesChanged();
+	}
+
+	protected static GUIContent GetToolbarContent(string text, string iconName, string tooltip) {
+		if (!ToolbarIconCache.TryGetValue(iconName, out var icon)) {
+			icon = EditorGUIUtility.FindTexture(iconName);
+			ToolbarIconCache.Add(iconName, icon);
+		}
+
+		return icon != null ? new GUIContent(text, icon, tooltip) : new GUIContent(text, tooltip);
 	}
 
 	protected void LoadFromCache() {
