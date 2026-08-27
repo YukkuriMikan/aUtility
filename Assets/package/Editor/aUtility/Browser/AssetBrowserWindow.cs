@@ -86,8 +86,11 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	protected virtual void DrawEntryExtraLabel(Rect labelRect, TEntry entry) { }
 	protected virtual void AddContextMenuItems(GenericMenu menu, TEntry entry) { }
 	protected virtual bool KeepInvisibleLivePreviews => false;
+	protected virtual double PreviewUpdateInterval => 0d;
+	protected virtual bool ShouldAdvanceLivePreview(TEntry entry, TLivePreview live) => true;
 	protected virtual void UpdateBackgroundWork() { }
 	protected virtual void OnEntriesChanged() { }
+	protected bool IsEntryVisible(TEntry entry) => _visibleEntries.Contains(entry);
 
 	protected virtual void OnEnable() {
 		_previewSize = EditorPrefs.GetFloat(PrefsKeyPrefix + ".PreviewSize", DefaultPreviewSize);
@@ -114,6 +117,10 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		UpdateBackgroundWork();
 
 		var now = EditorApplication.timeSinceStartup;
+		if (now - _lastUpdateTime < PreviewUpdateInterval) {
+			return;
+		}
+
 		var deltaTime = Mathf.Clamp((float)(now - _lastUpdateTime), 0f, 0.1f) * _playbackSpeed;
 		_lastUpdateTime = now;
 
@@ -121,18 +128,28 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 			return;
 		}
 
-		foreach (var live in _livePreviews.Values) {
-			if (live.Paused) {
+		var repaintNeeded = false;
+		foreach (var pair in _livePreviews) {
+			var live = pair.Value;
+			if (live.Paused || !ShouldAdvanceLivePreview(pair.Key, live)) {
 				continue;
 			}
 
 			AdvanceLivePreview(live, deltaTime);
+			repaintNeeded = true;
 		}
 
-		Repaint();
+		if (repaintNeeded) {
+			Repaint();
+		}
 	}
 
 	private void OnGUI() {
+		var isRepaint = Event.current.type == EventType.Repaint;
+		if (isRepaint) {
+			_visibleEntries.Clear();
+		}
+
 		DrawToolbar();
 		UpdateFilter();
 
@@ -173,9 +190,8 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 
 		DrawCameraGizmo(viewportRect);
 
-		if (Event.current.type == EventType.Repaint) {
+		if (isRepaint) {
 			ReleaseInvisibleLivePreviews();
-			_visibleEntries.Clear();
 		}
 	}
 
@@ -768,6 +784,8 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 			return null;
 		}
 
+		live.Renderers = instance.GetComponentsInChildren<Renderer>();
+
 		_livePreviews.Add(entry, live);
 
 		return live;
@@ -781,7 +799,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 
 		var bounds = new Bounds(live.Origin, Vector3.one);
 		var hasBounds = false;
-		foreach (var renderer in live.Instance.GetComponentsInChildren<Renderer>()) {
+		foreach (var renderer in live.Renderers) {
 			if (!hasBounds) {
 				bounds = renderer.bounds;
 				hasBounds = true;
@@ -1288,6 +1306,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 
 	public class LivePreviewBase {
 		public GameObject Instance;
+		public Renderer[] Renderers;
 		public float Time;
 		public float Radius;
 		public bool Paused;
