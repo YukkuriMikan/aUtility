@@ -10,8 +10,11 @@ public class
 	private const string CacheFolderName = "ParticlePrefabBrowserCache";
 	private const string CacheFileName = "particle_prefab_cache.txt";
 	private const string FavoritesFileName = "particle_prefab_favorites.txt";
+	private const string PreloadKey = "ParticlePrefabBrowser.Preload";
 
 	private static readonly Dictionary<Shader, bool> GrabPassShaderCache = new();
+	private bool _preloadEnabled;
+	private int _preloadIndex;
 	private static string _cacheFilePath;
 	private static string _favoritesFilePath;
 
@@ -35,6 +38,50 @@ public class
 		var window = GetWindow<ParticlePrefabBrowser>("Particle Prefab Browser");
 		window.minSize = new Vector2(480f, 300f);
 		window.LoadFromCache();
+	}
+
+	protected override void OnEnable() {
+		_preloadEnabled = EditorPrefs.GetBool(PreloadKey, false);
+		base.OnEnable();
+	}
+
+	protected override void DrawExtraToolbarButtons() {
+		var preloadLabel = !_preloadEnabled
+			? "Preload OFF"
+			: _preloadIndex < _entries.Count
+				? $"Preload {_preloadIndex}/{_entries.Count}"
+				: "Preload ON";
+		var preloadContent = GetToolbarContent(preloadLabel, "Profiler.Memory",
+			"ON: 全パーティクルのプレビューを段階的に生成し、メモリに保持します。スクロールは軽くなりますが、メモリ使用量が増えます。");
+		var newPreloadEnabled = GUILayout.Toggle(_preloadEnabled, preloadContent, EditorStyles.toolbarButton,
+			GUILayout.Width(110f));
+		if (newPreloadEnabled != _preloadEnabled) {
+			_preloadEnabled = newPreloadEnabled;
+			EditorPrefs.SetBool(PreloadKey, _preloadEnabled);
+			_preloadIndex = 0;
+			if (!_preloadEnabled) {
+				ReleaseAllLivePreviews();
+			}
+
+			Repaint();
+		}
+	}
+
+	protected override bool KeepInvisibleLivePreviews => _preloadEnabled;
+
+	protected override void UpdateBackgroundWork() {
+		if (!_preloadEnabled || _preloadIndex >= _entries.Count || EditorApplication.isCompiling ||
+		    EditorApplication.isUpdating) {
+			return;
+		}
+
+		GetOrCreateLivePreview(_entries[_preloadIndex]);
+		_preloadIndex++;
+		Repaint();
+	}
+
+	protected override void OnEntriesChanged() {
+		_preloadIndex = 0;
 	}
 
 	protected override void DrawExtraToolbarFilters() {
