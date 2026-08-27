@@ -91,6 +91,11 @@ public class ModelBrowser : AssetBrowserWindow<ModelBrowser.Entry, ModelBrowser.
 	}
 
 	protected override bool KeepInvisibleLivePreviews => _preloadEnabled;
+	protected override double PreviewUpdateInterval => 1d / 30d;
+
+	protected override bool ShouldAdvanceLivePreview(Entry entry, LivePreview live) {
+		return live.Clip != null && IsEntryVisible(entry);
+	}
 
 	protected override void UpdateBackgroundWork() {
 		if (!_preloadEnabled || _preloadIndex >= _entries.Count || EditorApplication.isCompiling ||
