@@ -268,7 +268,7 @@ public class
 	}
 
 	protected override void ScanAssets(List<Entry> entries, List<string> cacheGuids) {
-		var prefabGuids = AssetDatabase.FindAssets("t:Prefab");
+		var prefabGuids = AssetDatabase.FindAssets("t:Prefab", new[] { SearchRoot });
 		foreach (var guid in prefabGuids) {
 			var path = AssetDatabase.GUIDToAssetPath(guid);
 			if (!ContainsParticleSystem(path)) {

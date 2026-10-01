@@ -380,7 +380,8 @@ public class ModelBrowser : AssetBrowserWindow<ModelBrowser.Entry, ModelBrowser.
 
 	protected override void ScanAssets(List<Entry> entries, List<string> cacheGuids) {
 		// Scan Models (FBX)
-		var modelGuids = AssetDatabase.FindAssets("t:Model");
+		var searchFolders = new[] { SearchRoot };
+		var modelGuids = AssetDatabase.FindAssets("t:Model", searchFolders);
 		foreach (var guid in modelGuids) {
 			var path = AssetDatabase.GUIDToAssetPath(guid);
 			if (string.IsNullOrEmpty(path)) continue;
@@ -390,7 +391,7 @@ public class ModelBrowser : AssetBrowserWindow<ModelBrowser.Entry, ModelBrowser.
 		}
 
 		// Scan Prefabs
-		var prefabGuids = AssetDatabase.FindAssets("t:Prefab");
+		var prefabGuids = AssetDatabase.FindAssets("t:Prefab", searchFolders);
 		foreach (var guid in prefabGuids) {
 			var path = AssetDatabase.GUIDToAssetPath(guid);
 			if (string.IsNullOrEmpty(path)) continue;

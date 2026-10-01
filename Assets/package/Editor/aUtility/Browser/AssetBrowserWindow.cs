@@ -23,6 +23,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	protected const float MaxPreviewSize = 512f;
 	protected const float GizmoSize = 84f;
 	protected const float PreviewSlotSpacing = 2000f;
+	private const string DefaultSearchRoot = "Assets";
 
 	protected readonly List<TEntry> _entries = new();
 	protected readonly List<TEntry> _filteredEntries = new();
@@ -38,6 +39,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	protected float _playbackSpeed = 1f;
 	protected bool _paused;
 	protected string _searchText = string.Empty;
+	private string _searchRoot = DefaultSearchRoot;
 	protected bool _filterDirty = true;
 	protected bool _favoritesOnly;
 	protected readonly HashSet<string> _favorites = new(StringComparer.Ordinal);
@@ -50,6 +52,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	protected float PreviewSize => _previewSize;
 	protected float CellWidth => _previewSize + 32f;
 	protected float CellHeight => _previewSize + LabelHeight + (CellPadding * 3f);
+	protected string SearchRoot => _searchRoot;
 
 	// ---- Per-browser customization points ----
 	protected abstract string PrefsKeyPrefix { get; }
@@ -93,6 +96,14 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	protected bool IsEntryVisible(TEntry entry) => _visibleEntries.Contains(entry);
 
 	protected virtual void OnEnable() {
+		var searchRootKey = PrefsKeyPrefix + ".SearchRoot";
+		var storedSearchRoot = NormalizeAssetPath(EditorPrefs.GetString(searchRootKey, DefaultSearchRoot));
+		var searchRootInvalid = !IsValidSearchRoot(storedSearchRoot);
+		_searchRoot = searchRootInvalid ? DefaultSearchRoot : storedSearchRoot;
+		if (searchRootInvalid) {
+			EditorPrefs.SetString(searchRootKey, _searchRoot);
+		}
+
 		_previewSize = EditorPrefs.GetFloat(PrefsKeyPrefix + ".PreviewSize", DefaultPreviewSize);
 		_cameraYaw = EditorPrefs.GetFloat(PrefsKeyPrefix + ".CameraYaw", 0f);
 		_cameraPitch = EditorPrefs.GetFloat(PrefsKeyPrefix + ".CameraPitch", DefaultCameraPitch);
@@ -101,7 +112,14 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		_lastUpdateTime = EditorApplication.timeSinceStartup;
 		LoadFavorites();
 		LoadTags();
-		LoadFromCache();
+
+		var cachedSearchRoot = NormalizeAssetPath(EditorPrefs.GetString(
+			PrefsKeyPrefix + ".CachedSearchRoot", DefaultSearchRoot));
+		if (searchRootInvalid || !string.Equals(cachedSearchRoot, _searchRoot, StringComparison.Ordinal)) {
+			Refresh();
+		} else {
+			LoadFromCache();
+		}
 	}
 
 	protected virtual void OnDisable() {
@@ -313,9 +331,77 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 			}
 		}
 
+		DrawSearchRootToolbar();
+
 		if (_entries.Count == 0) {
 			EditorGUILayout.HelpBox(EmptyCacheMessage, MessageType.Info);
 		}
+	}
+
+	private void DrawSearchRootToolbar() {
+		using (new EditorGUILayout.HorizontalScope(EditorStyles.toolbar)) {
+			GUILayout.Label(GetToolbarContent("Search Root", "Folder Icon",
+				"指定したフォルダー以下のアセットを再帰的に探索します。"), EditorStyles.miniLabel,
+				GUILayout.Width(105f));
+			GUILayout.Label(_searchRoot, EditorStyles.miniLabel);
+			GUILayout.FlexibleSpace();
+
+			if (GUILayout.Button("Select...", EditorStyles.toolbarButton, GUILayout.Width(70f))) {
+				SelectSearchRoot();
+			}
+
+			using (new EditorGUI.DisabledGroupScope(string.Equals(_searchRoot, DefaultSearchRoot,
+				       StringComparison.Ordinal))) {
+				if (GUILayout.Button("Reset", EditorStyles.toolbarButton, GUILayout.Width(55f))) {
+					SetSearchRoot(DefaultSearchRoot);
+				}
+			}
+		}
+	}
+
+	private void SelectSearchRoot() {
+		var projectRoot = Path.GetDirectoryName(Application.dataPath);
+		var initialFolder = projectRoot == null
+			? Application.dataPath
+			: Path.GetFullPath(Path.Combine(projectRoot, _searchRoot));
+		var selectedFolder = EditorUtility.OpenFolderPanel("Select Search Root", initialFolder, string.Empty);
+		if (string.IsNullOrEmpty(selectedFolder)) {
+			return;
+		}
+
+		var assetPath = NormalizeAssetPath(FileUtil.GetProjectRelativePath(selectedFolder));
+		if (!IsValidSearchRoot(assetPath)) {
+			EditorUtility.DisplayDialog("Invalid Search Root",
+				"Assets フォルダーまたはその配下のフォルダーを選択してください。", "OK");
+			return;
+		}
+
+		SetSearchRoot(assetPath);
+	}
+
+	private void SetSearchRoot(string assetPath) {
+		assetPath = NormalizeAssetPath(assetPath);
+		if (string.Equals(_searchRoot, assetPath, StringComparison.Ordinal)) {
+			return;
+		}
+
+		_searchRoot = assetPath;
+		EditorPrefs.SetString(PrefsKeyPrefix + ".SearchRoot", _searchRoot);
+		_scrollPosition = Vector2.zero;
+		Refresh();
+		Repaint();
+	}
+
+	private static bool IsValidSearchRoot(string assetPath) {
+		return AssetDatabase.IsValidFolder(assetPath) &&
+		       (string.Equals(assetPath, DefaultSearchRoot, StringComparison.Ordinal) ||
+		        assetPath.StartsWith(DefaultSearchRoot + "/", StringComparison.Ordinal));
+	}
+
+	private static string NormalizeAssetPath(string assetPath) {
+		return string.IsNullOrWhiteSpace(assetPath)
+			? string.Empty
+			: assetPath.Replace('\\', '/').TrimEnd('/');
 	}
 
 	private static Rect GetCameraGizmoRect(Rect viewportRect) {
@@ -960,6 +1046,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 
 		_entries.Sort((a, b) => string.Compare(a.AssetPath, b.AssetPath, StringComparison.OrdinalIgnoreCase));
 		SaveCache(cacheGuids);
+		EditorPrefs.SetString(PrefsKeyPrefix + ".CachedSearchRoot", _searchRoot);
 		OnEntriesChanged();
 	}
 
