@@ -444,7 +444,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 
 	private static Rect GetLightGizmoRect(Rect viewportRect) {
 		var cameraRect = GetCameraGizmoRect(viewportRect);
-		return new Rect(cameraRect.x - GizmoSize - GizmoGap, cameraRect.y, GizmoSize, GizmoSize);
+		return new Rect(cameraRect.x, cameraRect.yMax + GizmoGap, GizmoSize, GizmoSize);
 	}
 
 	private void HandleCameraGizmoEvents(Rect gizmoRect) {
