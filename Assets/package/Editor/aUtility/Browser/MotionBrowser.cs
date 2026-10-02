@@ -142,17 +142,6 @@ public class MotionBrowser : AssetBrowserWindow<MotionBrowser.Entry, MotionBrows
 				EditorStyles.miniLabel);
 			GUILayout.FlexibleSpace();
 
-			using (new EditorGUI.DisabledGroupScope(_previewModel == null)) {
-				if (GUILayout.Button("Reset", EditorStyles.toolbarButton, GUILayout.Width(55f))) {
-					SetPreviewModel(null);
-				}
-			}
-		}
-
-		using (new EditorGUILayout.HorizontalScope(EditorStyles.toolbar)) {
-			GUILayout.Label(new GUIContent("Avatar Lists",
-				"プレビューモデルの履歴とお気に入りです。"), EditorStyles.miniLabel, GUILayout.Width(115f));
-
 			var previewModelId = GetPreviewModelId();
 			var isFavorite = ContainsStoredPath(_previewModelFavorites, previewModelId);
 			var newIsFavorite = GUILayout.Toggle(isFavorite,
@@ -172,7 +161,11 @@ public class MotionBrowser : AssetBrowserWindow<MotionBrowser.Entry, MotionBrows
 					"No Favorite Preview Models");
 			}
 
-			GUILayout.FlexibleSpace();
+			using (new EditorGUI.DisabledGroupScope(_previewModel == null)) {
+				if (GUILayout.Button("Reset", EditorStyles.toolbarButton, GUILayout.Width(55f))) {
+					SetPreviewModel(null);
+				}
+			}
 		}
 	}
 
