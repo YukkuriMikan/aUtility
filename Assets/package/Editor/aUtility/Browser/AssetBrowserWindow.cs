@@ -85,9 +85,28 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	// Optional hooks
 	protected virtual void DrawExtraToolbarFilters() { }
 	protected virtual void DrawExtraToolbarButtons() { }
+	protected virtual void DrawExtraToolbarRows() { }
+	protected virtual void HandleWindowDragAndDrop() { }
 	protected virtual void HandleEntryDragAndDrop(Rect previewRect, TEntry entry) { }
+	protected virtual void DrawEntryOverlay(Rect previewRect, TEntry entry) { }
+	protected virtual float GetEntryBottomOverlayHeight(TEntry entry) => 0f;
 	protected virtual void DrawEntryExtraLabel(Rect labelRect, TEntry entry) { }
 	protected virtual void AddContextMenuItems(GenericMenu menu, TEntry entry) { }
+	protected virtual void AddEntriesFromCachedPath(string path, List<TEntry> entries) {
+		var entry = CreateEntryFromCachedPath(path);
+		if (entry != null) {
+			entries.Add(entry);
+		}
+	}
+
+	protected virtual int CompareEntries(TEntry left, TEntry right) {
+		return string.Compare(left.AssetPath, right.AssetPath, StringComparison.OrdinalIgnoreCase);
+	}
+
+	protected virtual void ReleaseLivePreviewResources(TLivePreview live) { }
+	protected virtual GameObject InstantiatePreviewObject(TEntry entry, GameObject prefab) {
+		return prefab == null ? null : _previewUtility.InstantiatePrefabInScene(prefab);
+	}
 	protected virtual bool KeepInvisibleLivePreviews => false;
 	protected virtual double PreviewUpdateInterval => 0d;
 	protected virtual bool ShouldAdvanceLivePreview(TEntry entry, TLivePreview live) => true;
@@ -163,6 +182,8 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	}
 
 	private void OnGUI() {
+		HandleWindowDragAndDrop();
+
 		var isRepaint = Event.current.type == EventType.Repaint;
 		if (isRepaint) {
 			_visibleEntries.Clear();
@@ -332,6 +353,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		}
 
 		DrawSearchRootToolbar();
+		DrawExtraToolbarRows();
 
 		if (_entries.Count == 0) {
 			EditorGUILayout.HelpBox(EmptyCacheMessage, MessageType.Info);
@@ -551,6 +573,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		DrawEntryPlaybackButtons(previewRect, entry);
 		DrawEntryFavoriteButton(previewRect, entry);
 		DrawEntryTags(previewRect, entry);
+		DrawEntryOverlay(previewRect, entry);
 
 		if (Event.current.type == EventType.MouseDown && Event.current.button == 1 &&
 		    previewRect.Contains(Event.current.mousePosition)) {
@@ -735,7 +758,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		const float tagPadding = 6f;
 		const float tagGap = 2f;
 		var x = previewRect.x + 2f;
-		var y = previewRect.yMax - tagHeight - 2f;
+		var y = previewRect.yMax - tagHeight - 2f - GetEntryBottomOverlayHeight(entry);
 
 		foreach (var tag in tags) {
 			var width = Mathf.Min(style.CalcSize(new GUIContent(tag)).x + tagPadding, previewRect.width - 4f);
@@ -852,7 +875,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 
 		EnsurePreviewUtility();
 
-		var instance = _previewUtility.InstantiatePrefabInScene(prefab);
+		var instance = InstantiatePreviewObject(entry, prefab);
 		if (instance == null) {
 			return null;
 		}
@@ -905,14 +928,11 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		previewCamera.transform.LookAt(bounds.center);
 
 		var useSrp = GraphicsSettings.currentRenderPipeline != null && UseSrpForLivePreview(live);
-		var previousSrpFlag = Unsupported.useScriptableRenderPipeline;
 		var previousAsyncCompilation = ShaderUtil.allowAsyncCompilation;
-		Unsupported.useScriptableRenderPipeline = useSrp;
 		ShaderUtil.allowAsyncCompilation = false;
 		try {
-			previewCamera.Render();
+			_previewUtility.Render(useSrp);
 		} finally {
-			Unsupported.useScriptableRenderPipeline = previousSrpFlag;
 			ShaderUtil.allowAsyncCompilation = previousAsyncCompilation;
 		}
 
@@ -946,6 +966,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 			return;
 		}
 
+		ReleaseLivePreviewResources(live);
 		if (live.Instance != null) {
 			DestroyImmediate(live.Instance);
 		}
@@ -956,6 +977,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 
 	protected void ReleaseAllLivePreviews() {
 		foreach (var live in _livePreviews.Values) {
+			ReleaseLivePreviewResources(live);
 			if (live.Instance != null) {
 				DestroyImmediate(live.Instance);
 			}
@@ -1044,7 +1066,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 
 		ScanAssets(_entries, cacheGuids);
 
-		_entries.Sort((a, b) => string.Compare(a.AssetPath, b.AssetPath, StringComparison.OrdinalIgnoreCase));
+		_entries.Sort(CompareEntries);
 		SaveCache(cacheGuids);
 		EditorPrefs.SetString(PrefsKeyPrefix + ".CachedSearchRoot", _searchRoot);
 		OnEntriesChanged();
@@ -1080,13 +1102,10 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 				continue;
 			}
 
-			var entry = CreateEntryFromCachedPath(path);
-			if (entry != null) {
-				_entries.Add(entry);
-			}
+			AddEntriesFromCachedPath(path, _entries);
 		}
 
-		_entries.Sort((a, b) => string.Compare(a.AssetPath, b.AssetPath, StringComparison.OrdinalIgnoreCase));
+		_entries.Sort(CompareEntries);
 		OnEntriesChanged();
 	}
 
@@ -1209,7 +1228,12 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		}
 
 		// Favorite entry roots go into their own folders.
+		var exportedRootPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 		foreach (var entry in favoriteEntries) {
+			if (!exportedRootPaths.Add(entry.AssetPath)) {
+				continue;
+			}
+
 			var guid = AssetDatabase.AssetPathToGUID(entry.AssetPath);
 			if (string.IsNullOrEmpty(guid) || !File.Exists(entry.AssetPath)) {
 				continue;
@@ -1385,9 +1409,9 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		public Texture2D Preview;
 		public bool PreviewFailed;
 
-		protected EntryBase(string assetPath) {
+		protected EntryBase(string assetPath, string stableId = null) {
 			AssetPath = assetPath;
-			Guid = AssetDatabase.AssetPathToGUID(assetPath);
+			Guid = stableId ?? AssetDatabase.AssetPathToGUID(assetPath);
 		}
 	}
 
