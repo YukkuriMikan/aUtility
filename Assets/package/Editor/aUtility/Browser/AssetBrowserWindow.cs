@@ -24,6 +24,10 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	protected const float GizmoSize = 84f;
 	protected const float PreviewSlotSpacing = 2000f;
 	private const string DefaultSearchRoot = "Assets";
+	private const float DefaultLightYaw = 40f;
+	private const float DefaultLightPitch = 40f;
+	private const float GizmoMargin = 12f;
+	private const float GizmoGap = 8f;
 
 	protected readonly List<TEntry> _entries = new();
 	protected readonly List<TEntry> _filteredEntries = new();
@@ -36,6 +40,8 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	protected float _cameraYaw;
 	protected float _cameraPitch;
 	protected float _cameraDistance;
+	protected float _lightYaw;
+	protected float _lightPitch;
 	protected float _playbackSpeed = 1f;
 	protected bool _paused;
 	protected string _searchText = string.Empty;
@@ -48,6 +54,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	private static readonly Dictionary<string, Texture2D> ToolbarIconCache = new(StringComparer.Ordinal);
 	private double _lastUpdateTime;
 	protected bool _draggingGizmo;
+	protected bool _draggingLightGizmo;
 
 	protected float PreviewSize => _previewSize;
 	protected float CellWidth => _previewSize + 32f;
@@ -127,6 +134,8 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		_cameraYaw = EditorPrefs.GetFloat(PrefsKeyPrefix + ".CameraYaw", 0f);
 		_cameraPitch = EditorPrefs.GetFloat(PrefsKeyPrefix + ".CameraPitch", DefaultCameraPitch);
 		_cameraDistance = EditorPrefs.GetFloat(PrefsKeyPrefix + ".CameraDistance", DefaultCameraDistance);
+		_lightYaw = EditorPrefs.GetFloat(PrefsKeyPrefix + ".LightYaw", DefaultLightYaw);
+		_lightPitch = EditorPrefs.GetFloat(PrefsKeyPrefix + ".LightPitch", DefaultLightPitch);
 		_playbackSpeed = EditorPrefs.GetFloat(PrefsKeyPrefix + ".PlaybackSpeed", 1f);
 		_lastUpdateTime = EditorApplication.timeSinceStartup;
 		LoadFavorites();
@@ -207,6 +216,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		var contentRect = new Rect(0f, 0f, contentWidth, contentHeight);
 
 		HandleCameraGizmoEvents(GetCameraGizmoRect(viewportRect));
+		HandleLightGizmoEvents(GetLightGizmoRect(viewportRect));
 
 		_scrollPosition = GUI.BeginScrollView(viewportRect, _scrollPosition, contentRect);
 
@@ -228,6 +238,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		GUI.EndScrollView();
 
 		DrawCameraGizmo(viewportRect);
+		DrawLightGizmo(viewportRect);
 
 		if (isRepaint) {
 			ReleaseInvisibleLivePreviews();
@@ -427,8 +438,13 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	}
 
 	private static Rect GetCameraGizmoRect(Rect viewportRect) {
-		const float margin = 12f;
-		return new Rect(viewportRect.xMax - GizmoSize - margin, viewportRect.y + margin, GizmoSize, GizmoSize);
+		return new Rect(viewportRect.xMax - GizmoSize - GizmoMargin, viewportRect.y + GizmoMargin, GizmoSize,
+			GizmoSize);
+	}
+
+	private static Rect GetLightGizmoRect(Rect viewportRect) {
+		var cameraRect = GetCameraGizmoRect(viewportRect);
+		return new Rect(cameraRect.x - GizmoSize - GizmoGap, cameraRect.y, GizmoSize, GizmoSize);
 	}
 
 	private void HandleCameraGizmoEvents(Rect gizmoRect) {
@@ -478,6 +494,48 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		EditorGUIUtility.AddCursorRect(gizmoRect, MouseCursor.Orbit);
 	}
 
+	private void HandleLightGizmoEvents(Rect gizmoRect) {
+		var evt = Event.current;
+		var controlId = GUIUtility.GetControlID((PrefsKeyPrefix + "LightGizmo").GetHashCode(), FocusType.Passive,
+			gizmoRect);
+
+		switch (evt.GetTypeForControl(controlId)) {
+			case EventType.MouseDown:
+				if (evt.button == 2 && gizmoRect.Contains(evt.mousePosition)) {
+					ResetLightView();
+					evt.Use();
+				} else if (evt.button == 0 && gizmoRect.Contains(evt.mousePosition)) {
+					GUIUtility.hotControl = controlId;
+					_draggingLightGizmo = true;
+					evt.Use();
+				}
+
+				break;
+			case EventType.MouseDrag:
+				if (GUIUtility.hotControl == controlId) {
+					_lightYaw = NormalizeAngle(_lightYaw + (evt.delta.x * 0.75f));
+					_lightPitch = Mathf.Clamp(_lightPitch + (evt.delta.y * 0.75f), -89f, 89f);
+					EditorPrefs.SetFloat(PrefsKeyPrefix + ".LightYaw", _lightYaw);
+					EditorPrefs.SetFloat(PrefsKeyPrefix + ".LightPitch", _lightPitch);
+					ApplyPreviewLightRotation();
+					evt.Use();
+					Repaint();
+				}
+
+				break;
+			case EventType.MouseUp:
+				if (GUIUtility.hotControl == controlId) {
+					GUIUtility.hotControl = 0;
+					_draggingLightGizmo = false;
+					evt.Use();
+				}
+
+				break;
+		}
+
+		EditorGUIUtility.AddCursorRect(gizmoRect, MouseCursor.Orbit);
+	}
+
 	private void ResetCameraView() {
 		_cameraYaw = 0f;
 		_cameraPitch = DefaultCameraPitch;
@@ -486,6 +544,26 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		EditorPrefs.SetFloat(PrefsKeyPrefix + ".CameraPitch", _cameraPitch);
 		EditorPrefs.SetFloat(PrefsKeyPrefix + ".CameraDistance", _cameraDistance);
 		Repaint();
+	}
+
+	private void ResetLightView() {
+		_lightYaw = DefaultLightYaw;
+		_lightPitch = DefaultLightPitch;
+		EditorPrefs.SetFloat(PrefsKeyPrefix + ".LightYaw", _lightYaw);
+		EditorPrefs.SetFloat(PrefsKeyPrefix + ".LightPitch", _lightPitch);
+		ApplyPreviewLightRotation();
+		Repaint();
+	}
+
+	private static float NormalizeAngle(float angle) {
+		if (angle > 180f) {
+			return angle - 360f;
+		}
+		if (angle < -180f) {
+			return angle + 360f;
+		}
+
+		return angle;
 	}
 
 	private void DrawCameraGizmo(Rect viewportRect) {
@@ -518,6 +596,69 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		DrawGizmoAxis(center, radius, viewRotation * Vector3.forward, new Color(0.3f, 0.55f, 0.95f, 1f), "Z");
 
 		Handles.color = previousColor;
+		Handles.EndGUI();
+	}
+
+	private void DrawLightGizmo(Rect viewportRect) {
+		var evt = Event.current;
+		if (evt.type != EventType.Repaint) {
+			return;
+		}
+
+		var gizmoRect = GetLightGizmoRect(viewportRect);
+		var center = gizmoRect.center;
+		var radius = (GizmoSize * 0.5f) - 6f;
+		var hovered = gizmoRect.Contains(evt.mousePosition);
+		var backgroundColor = _draggingLightGizmo || hovered
+			? new Color(0.16f, 0.12f, 0.02f, 0.78f)
+			: new Color(0.08f, 0.07f, 0.02f, 0.65f);
+		var lightColor = new Color(1f, 0.78f, 0.16f, 1f);
+
+		Handles.BeginGUI();
+		var previousHandlesColor = Handles.color;
+		var previousGuiColor = GUI.color;
+
+		Handles.color = backgroundColor;
+		Handles.DrawSolidDisc(center, Vector3.forward, radius + 4f);
+		Handles.color = new Color(lightColor.r, lightColor.g, lightColor.b, 0.55f);
+		Handles.DrawWireDisc(center, Vector3.forward, radius + 4f);
+
+		var lightRotation = Quaternion.Euler(_lightPitch, _lightYaw, 0f);
+		var lightDirection = lightRotation * Vector3.forward;
+		var projectedDirection = new Vector2(lightDirection.x, -lightDirection.y);
+		var sunCenter = center + (projectedDirection * (radius - 16f));
+		var arrowDirection = center - sunCenter;
+		if (arrowDirection.sqrMagnitude < 1f) {
+			arrowDirection = Vector2.down;
+		}
+		arrowDirection.Normalize();
+
+		Handles.color = new Color(lightColor.r, lightColor.g, lightColor.b, 0.75f);
+		Handles.DrawAAPolyLine(2.5f, sunCenter, center);
+		var arrowBase = center - (arrowDirection * 7f);
+		var arrowPerpendicular = new Vector2(-arrowDirection.y, arrowDirection.x) * 4f;
+		Handles.DrawAAConvexPolygon(center, arrowBase + arrowPerpendicular, arrowBase - arrowPerpendicular);
+
+		const int rayCount = 8;
+		const float sunRadius = 6f;
+		for (var index = 0; index < rayCount; index++) {
+			var angle = (Mathf.PI * 2f * index) / rayCount;
+			var direction = new Vector2(Mathf.Cos(angle), Mathf.Sin(angle));
+			Handles.DrawAAPolyLine(2f, sunCenter + (direction * 9f), sunCenter + (direction * 13f));
+		}
+
+		Handles.color = lightColor;
+		Handles.DrawSolidDisc(sunCenter, Vector3.forward, sunRadius);
+		Handles.color = new Color(1f, 0.95f, 0.6f, 1f);
+		Handles.DrawWireDisc(sunCenter, Vector3.forward, sunRadius);
+
+		GUI.color = lightColor;
+		GUI.Label(new Rect(gizmoRect.x + 12f, gizmoRect.yMax - 20f, gizmoRect.width - 24f, 16f),
+			new GUIContent("LIGHT", "左ドラッグ: ライト回転 / 中クリック: リセット"),
+			EditorStyles.centeredGreyMiniLabel);
+
+		GUI.color = previousGuiColor;
+		Handles.color = previousHandlesColor;
 		Handles.EndGUI();
 	}
 
@@ -853,7 +994,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		_previewUtility.camera.clearFlags = CameraClearFlags.SolidColor;
 		_previewUtility.camera.backgroundColor = new Color(0.12f, 0.12f, 0.12f, 1f);
 		_previewUtility.lights[0].intensity = 1.2f;
-		_previewUtility.lights[0].transform.rotation = Quaternion.Euler(40f, 40f, 0f);
+		ApplyPreviewLightRotation();
 
 		if (GraphicsSettings.currentRenderPipeline is UniversalRenderPipelineAsset) {
 			var cameraData = _previewUtility.camera.GetUniversalAdditionalCameraData();
@@ -861,6 +1002,14 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 			cameraData.renderPostProcessing = false;
 			cameraData.antialiasing = AntialiasingMode.None;
 		}
+	}
+
+	private void ApplyPreviewLightRotation() {
+		if (_previewUtility == null) {
+			return;
+		}
+
+		_previewUtility.lights[0].transform.rotation = Quaternion.Euler(_lightPitch, _lightYaw, 0f);
 	}
 
 	protected TLivePreview GetOrCreateLivePreview(TEntry entry) {
