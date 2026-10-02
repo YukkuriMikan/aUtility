@@ -199,6 +199,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	}
 
 	private void OnGUI() {
+		HandleSearchRootDragAndDrop();
 		HandleWindowDragAndDrop();
 
 		var isRepaint = Event.current.type == EventType.Repaint;
@@ -390,7 +391,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	private void DrawSearchRootToolbar() {
 		using (new EditorGUILayout.HorizontalScope(EditorStyles.toolbar)) {
 			GUILayout.Label(new GUIContent("Search Root",
-				"指定したフォルダー以下のアセットを再帰的に探索します。"), EditorStyles.miniLabel,
+				"指定したフォルダー以下のアセットを再帰的に探索します。フォルダーのD&Dでも変更できます。"), EditorStyles.miniLabel,
 				GUILayout.Width(105f));
 			GUILayout.Label(_searchRoot, EditorStyles.miniLabel);
 			GUILayout.FlexibleSpace();
@@ -406,6 +407,56 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 				}
 			}
 		}
+	}
+
+	private void HandleSearchRootDragAndDrop() {
+		var evt = Event.current;
+		if (evt.type != EventType.DragUpdated && evt.type != EventType.DragPerform) {
+			return;
+		}
+
+		var folderPath = GetDroppedSearchRoot();
+		if (string.IsNullOrEmpty(folderPath)) {
+			return;
+		}
+
+		DragAndDrop.visualMode = DragAndDropVisualMode.Link;
+		if (evt.type == EventType.DragPerform) {
+			DragAndDrop.AcceptDrag();
+			SetSearchRoot(folderPath);
+		}
+
+		evt.Use();
+	}
+
+	private static string GetDroppedSearchRoot() {
+		foreach (var droppedPath in DragAndDrop.paths) {
+			var assetPath = NormalizeDroppedAssetPath(droppedPath);
+			if (IsValidSearchRoot(assetPath)) {
+				return assetPath;
+			}
+		}
+
+		foreach (var droppedObject in DragAndDrop.objectReferences) {
+			var assetPath = NormalizeAssetPath(AssetDatabase.GetAssetPath(droppedObject));
+			if (IsValidSearchRoot(assetPath)) {
+				return assetPath;
+			}
+		}
+
+		return null;
+	}
+
+	private static string NormalizeDroppedAssetPath(string path) {
+		if (string.IsNullOrWhiteSpace(path)) {
+			return string.Empty;
+		}
+
+		if (Path.IsPathRooted(path)) {
+			path = FileUtil.GetProjectRelativePath(path);
+		}
+
+		return NormalizeAssetPath(path);
 	}
 
 	private void SelectSearchRoot() {
