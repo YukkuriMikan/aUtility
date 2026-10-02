@@ -362,7 +362,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 
 	private void DrawSearchRootToolbar() {
 		using (new EditorGUILayout.HorizontalScope(EditorStyles.toolbar)) {
-			GUILayout.Label(GetToolbarContent("Search Root", "Folder Icon",
+			GUILayout.Label(new GUIContent("Search Root",
 				"指定したフォルダー以下のアセットを再帰的に探索します。"), EditorStyles.miniLabel,
 				GUILayout.Width(105f));
 			GUILayout.Label(_searchRoot, EditorStyles.miniLabel);

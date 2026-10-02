@@ -115,7 +115,7 @@ public class MotionBrowser : AssetBrowserWindow<MotionBrowser.Entry, MotionBrows
 
 	protected override void DrawExtraToolbarRows() {
 		using (new EditorGUILayout.HorizontalScope(EditorStyles.toolbar)) {
-			GUILayout.Label(GetToolbarContent("Preview Model", "Animator Icon",
+			GUILayout.Label(new GUIContent("Preview Model",
 				"プレビューに使用するモデルです。モデルをウィンドウへドロップしても変更できます。"),
 				EditorStyles.miniLabel, GUILayout.Width(115f));
 
