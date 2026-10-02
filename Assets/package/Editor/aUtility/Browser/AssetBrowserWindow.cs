@@ -44,6 +44,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	protected float _lightPitch;
 	protected float _playbackSpeed = 1f;
 	protected bool _paused;
+	protected bool _groundEnabled;
 	protected string _searchText = string.Empty;
 	private string _searchRoot = DefaultSearchRoot;
 	protected bool _filterDirty = true;
@@ -52,6 +53,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	protected readonly Dictionary<string, List<string>> _entryTags = new(StringComparer.Ordinal);
 	protected PreviewRenderUtility _previewUtility;
 	private static readonly Dictionary<string, Texture2D> ToolbarIconCache = new(StringComparer.Ordinal);
+	private Material _previewGroundMaterial;
 	private double _lastUpdateTime;
 	protected bool _draggingGizmo;
 	protected bool _draggingLightGizmo;
@@ -136,6 +138,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		_cameraDistance = EditorPrefs.GetFloat(PrefsKeyPrefix + ".CameraDistance", DefaultCameraDistance);
 		_lightYaw = EditorPrefs.GetFloat(PrefsKeyPrefix + ".LightYaw", DefaultLightYaw);
 		_lightPitch = EditorPrefs.GetFloat(PrefsKeyPrefix + ".LightPitch", DefaultLightPitch);
+		_groundEnabled = EditorPrefs.GetBool(PrefsKeyPrefix + ".GroundEnabled", true);
 		_playbackSpeed = EditorPrefs.GetFloat(PrefsKeyPrefix + ".PlaybackSpeed", 1f);
 		_lastUpdateTime = EditorApplication.timeSinceStartup;
 		LoadFavorites();
@@ -156,6 +159,11 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		if (_previewUtility != null) {
 			_previewUtility.Cleanup();
 			_previewUtility = null;
+		}
+
+		if (_previewGroundMaterial != null) {
+			DestroyImmediate(_previewGroundMaterial);
+			_previewGroundMaterial = null;
 		}
 	}
 
@@ -315,6 +323,14 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 				: GetToolbarContent("Pause", "PauseButton", "プレビューの再生を一時停止します。");
 			if (GUILayout.Button(pauseContent, EditorStyles.toolbarButton, GUILayout.Width(70f))) {
 				_paused = !_paused;
+			}
+
+			var groundContent = new GUIContent(_groundEnabled ? "Ground ON" : "Ground OFF",
+				"プレビューの地面を表示または非表示にします。");
+			var newGroundEnabled = GUILayout.Toggle(_groundEnabled, groundContent, EditorStyles.toolbarButton,
+				GUILayout.Width(90f));
+			if (newGroundEnabled != _groundEnabled) {
+				SetGroundEnabled(newGroundEnabled);
 			}
 
 			DrawExtraToolbarButtons();
@@ -552,6 +568,18 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		EditorPrefs.SetFloat(PrefsKeyPrefix + ".LightYaw", _lightYaw);
 		EditorPrefs.SetFloat(PrefsKeyPrefix + ".LightPitch", _lightPitch);
 		ApplyPreviewLightRotation();
+		Repaint();
+	}
+
+	private void SetGroundEnabled(bool enabled) {
+		_groundEnabled = enabled;
+		EditorPrefs.SetBool(PrefsKeyPrefix + ".GroundEnabled", _groundEnabled);
+		if (!_groundEnabled) {
+			foreach (var live in _livePreviews.Values) {
+				DestroyPreviewGround(live);
+			}
+		}
+
 		Repaint();
 	}
 
@@ -993,6 +1021,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		_previewUtility.camera.farClipPlane = 1000f;
 		_previewUtility.camera.clearFlags = CameraClearFlags.SolidColor;
 		_previewUtility.camera.backgroundColor = new Color(0.12f, 0.12f, 0.12f, 1f);
+		_previewUtility.ambientColor = new Color(0.18f, 0.18f, 0.18f, 0f);
 		_previewUtility.lights[0].intensity = 1.2f;
 		ApplyPreviewLightRotation();
 
@@ -1068,6 +1097,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 
 		var radius = Mathf.Max(0.5f, bounds.extents.magnitude);
 		live.Radius = Mathf.Max(live.Radius, radius);
+		UpdatePreviewGround(live, bounds);
 
 		_previewUtility.BeginPreview(rect, GUIStyle.none);
 		var previewCamera = _previewUtility.camera;
@@ -1086,6 +1116,94 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		}
 
 		return _previewUtility.EndPreview();
+	}
+
+	private void UpdatePreviewGround(TLivePreview live, Bounds bounds) {
+		if (!_groundEnabled) {
+			DestroyPreviewGround(live);
+			return;
+		}
+
+		if (live.Ground == null) {
+			live.Ground = CreatePreviewGround();
+		}
+		if (live.Ground == null) {
+			return;
+		}
+
+		var verticalOffset = Mathf.Max(0.001f, live.Radius * 0.002f);
+		live.Ground.transform.position = new Vector3(bounds.center.x, bounds.min.y - verticalOffset, bounds.center.z);
+		var scale = Mathf.Max(0.1f, live.Radius * 0.4f);
+		live.Ground.transform.localScale = new Vector3(scale, 1f, scale);
+	}
+
+	private GameObject CreatePreviewGround() {
+		var mesh = Resources.GetBuiltinResource<Mesh>("New-Plane.fbx");
+		var material = GetPreviewGroundMaterial();
+		if (mesh == null || material == null) {
+			return null;
+		}
+
+		var ground = EditorUtility.CreateGameObjectWithHideFlags("Preview Ground", HideFlags.HideAndDontSave,
+			typeof(MeshFilter), typeof(MeshRenderer));
+		ground.GetComponent<MeshFilter>().sharedMesh = mesh;
+		var renderer = ground.GetComponent<MeshRenderer>();
+		renderer.sharedMaterial = material;
+		renderer.shadowCastingMode = ShadowCastingMode.Off;
+		renderer.receiveShadows = true;
+		_previewUtility.AddSingleGO(ground);
+		return ground;
+	}
+
+	private Material GetPreviewGroundMaterial() {
+		if (_previewGroundMaterial != null) {
+			return _previewGroundMaterial;
+		}
+
+		Shader shader;
+		if (GraphicsSettings.currentRenderPipeline is UniversalRenderPipelineAsset) {
+			shader = Shader.Find("Universal Render Pipeline/Lit");
+		} else if (GraphicsSettings.currentRenderPipeline != null) {
+			shader = Shader.Find("HDRP/Lit") ?? Shader.Find("Universal Render Pipeline/Lit");
+		} else {
+			shader = Shader.Find("Standard");
+		}
+
+		if (shader == null) {
+			return null;
+		}
+
+		_previewGroundMaterial = new Material(shader) {
+			name = "Asset Browser Preview Ground Material",
+			hideFlags = HideFlags.HideAndDontSave
+		};
+		var color = new Color(0.32f, 0.34f, 0.38f, 1f);
+		if (_previewGroundMaterial.HasProperty("_BaseColor")) {
+			_previewGroundMaterial.SetColor("_BaseColor", color);
+		}
+		if (_previewGroundMaterial.HasProperty("_Color")) {
+			_previewGroundMaterial.SetColor("_Color", color);
+		}
+		if (_previewGroundMaterial.HasProperty("_Metallic")) {
+			_previewGroundMaterial.SetFloat("_Metallic", 0f);
+		}
+		if (_previewGroundMaterial.HasProperty("_Smoothness")) {
+			_previewGroundMaterial.SetFloat("_Smoothness", 0.12f);
+		}
+		if (_previewGroundMaterial.HasProperty("_Glossiness")) {
+			_previewGroundMaterial.SetFloat("_Glossiness", 0.12f);
+		}
+
+		return _previewGroundMaterial;
+	}
+
+	private static void DestroyPreviewGround(TLivePreview live) {
+		if (live.Ground == null) {
+			return;
+		}
+
+		DestroyImmediate(live.Ground);
+		live.Ground = null;
 	}
 
 	private void ReleaseInvisibleLivePreviews() {
@@ -1116,6 +1234,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		}
 
 		ReleaseLivePreviewResources(live);
+		DestroyPreviewGround(live);
 		if (live.Instance != null) {
 			DestroyImmediate(live.Instance);
 		}
@@ -1127,6 +1246,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	protected void ReleaseAllLivePreviews() {
 		foreach (var live in _livePreviews.Values) {
 			ReleaseLivePreviewResources(live);
+			DestroyPreviewGround(live);
 			if (live.Instance != null) {
 				DestroyImmediate(live.Instance);
 			}
@@ -1566,6 +1686,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 
 	public class LivePreviewBase {
 		public GameObject Instance;
+		public GameObject Ground;
 		public Renderer[] Renderers;
 		public float Time;
 		public float Radius;
