@@ -28,6 +28,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	private const float DefaultLightPitch = 40f;
 	private const float GizmoMargin = 12f;
 	private const float GizmoGap = 8f;
+	private const int MaxSearchRootHistory = 16;
 
 	protected readonly List<TEntry> _entries = new();
 	protected readonly List<TEntry> _filteredEntries = new();
@@ -35,6 +36,8 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	private readonly Queue<int> _freePreviewSlots = new();
 	private int _nextPreviewSlot;
 	private readonly HashSet<TEntry> _visibleEntries = new();
+	private readonly List<string> _searchRootHistory = new();
+	private readonly List<string> _searchRootFavorites = new();
 	protected Vector2 _scrollPosition;
 	protected float _previewSize;
 	protected float _cameraYaw;
@@ -131,6 +134,11 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		if (searchRootInvalid) {
 			EditorPrefs.SetString(searchRootKey, _searchRoot);
 		}
+		LoadStoredPathList(PrefsKeyPrefix + ".SearchRootHistory", _searchRootHistory);
+		LoadStoredPathList(PrefsKeyPrefix + ".SearchRootFavorites", _searchRootFavorites);
+		PruneSearchRootList(_searchRootHistory, PrefsKeyPrefix + ".SearchRootHistory");
+		PruneSearchRootList(_searchRootFavorites, PrefsKeyPrefix + ".SearchRootFavorites");
+		RememberSearchRoot(_searchRoot);
 
 		_previewSize = EditorPrefs.GetFloat(PrefsKeyPrefix + ".PreviewSize", DefaultPreviewSize);
 		_cameraYaw = EditorPrefs.GetFloat(PrefsKeyPrefix + ".CameraYaw", 0f);
@@ -396,6 +404,24 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 			GUILayout.Label(_searchRoot, EditorStyles.miniLabel);
 			GUILayout.FlexibleSpace();
 
+			var isFavorite = ContainsStoredPath(_searchRootFavorites, _searchRoot);
+			var newIsFavorite = GUILayout.Toggle(isFavorite,
+				new GUIContent(isFavorite ? "★" : "☆", "現在のSearch Rootをお気に入りに追加または削除します。"),
+				EditorStyles.toolbarButton, GUILayout.Width(28f));
+			if (newIsFavorite != isFavorite) {
+				ToggleStoredPath(_searchRootFavorites, _searchRoot);
+				SaveStoredPathList(PrefsKeyPrefix + ".SearchRootFavorites", _searchRootFavorites);
+			}
+
+			if (GUILayout.Button("History ▾", EditorStyles.toolbarDropDown, GUILayout.Width(75f))) {
+				ShowSearchRootMenu(_searchRootHistory, PrefsKeyPrefix + ".SearchRootHistory", "No Search Root History");
+			}
+
+			if (GUILayout.Button("Favorites ▾", EditorStyles.toolbarDropDown, GUILayout.Width(85f))) {
+				ShowSearchRootMenu(_searchRootFavorites, PrefsKeyPrefix + ".SearchRootFavorites",
+					"No Favorite Search Roots");
+			}
+
 			if (GUILayout.Button("Select...", EditorStyles.toolbarButton, GUILayout.Width(70f))) {
 				SelectSearchRoot();
 			}
@@ -407,6 +433,33 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 				}
 			}
 		}
+	}
+
+	private void ShowSearchRootMenu(List<string> paths, string prefsKey, string emptyMessage) {
+		PruneSearchRootList(paths, prefsKey);
+		var menu = new GenericMenu();
+		if (paths.Count == 0) {
+			menu.AddDisabledItem(new GUIContent(emptyMessage));
+		} else {
+			foreach (var storedPath in paths) {
+				var path = storedPath;
+				menu.AddItem(new GUIContent(FormatPathForMenu(path)),
+					string.Equals(path, _searchRoot, StringComparison.OrdinalIgnoreCase), () => SetSearchRoot(path));
+			}
+		}
+
+		menu.ShowAsContext();
+	}
+
+	private void PruneSearchRootList(List<string> paths, string prefsKey) {
+		if (paths.RemoveAll(path => !IsValidSearchRoot(path)) > 0) {
+			SaveStoredPathList(prefsKey, paths);
+		}
+	}
+
+	private void RememberSearchRoot(string path) {
+		AddRecentStoredPath(_searchRootHistory, path, MaxSearchRootHistory);
+		SaveStoredPathList(PrefsKeyPrefix + ".SearchRootHistory", _searchRootHistory);
 	}
 
 	private void HandleSearchRootDragAndDrop() {
@@ -487,6 +540,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 
 		_searchRoot = assetPath;
 		EditorPrefs.SetString(PrefsKeyPrefix + ".SearchRoot", _searchRoot);
+		RememberSearchRoot(_searchRoot);
 		_scrollPosition = Vector2.zero;
 		Refresh();
 		Repaint();
@@ -502,6 +556,55 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		return string.IsNullOrWhiteSpace(assetPath)
 			? string.Empty
 			: assetPath.Replace('\\', '/').TrimEnd('/');
+	}
+
+	protected static void LoadStoredPathList(string prefsKey, List<string> paths) {
+		paths.Clear();
+		var storedValue = EditorPrefs.GetString(prefsKey, string.Empty);
+		if (string.IsNullOrEmpty(storedValue)) {
+			return;
+		}
+
+		foreach (var storedPath in storedValue.Split('\n')) {
+			var path = storedPath.Trim();
+			if (!string.IsNullOrEmpty(path) && !ContainsStoredPath(paths, path)) {
+				paths.Add(path);
+			}
+		}
+	}
+
+	protected static void SaveStoredPathList(string prefsKey, List<string> paths) {
+		if (paths.Count == 0) {
+			EditorPrefs.DeleteKey(prefsKey);
+			return;
+		}
+
+		EditorPrefs.SetString(prefsKey, string.Join("\n", paths));
+	}
+
+	protected static void AddRecentStoredPath(List<string> paths, string path, int maxCount) {
+		paths.RemoveAll(item => string.Equals(item, path, StringComparison.OrdinalIgnoreCase));
+		paths.Insert(0, path);
+		if (paths.Count > maxCount) {
+			paths.RemoveRange(maxCount, paths.Count - maxCount);
+		}
+	}
+
+	protected static bool ContainsStoredPath(List<string> paths, string path) {
+		return paths.Exists(item => string.Equals(item, path, StringComparison.OrdinalIgnoreCase));
+	}
+
+	protected static void ToggleStoredPath(List<string> paths, string path) {
+		var index = paths.FindIndex(item => string.Equals(item, path, StringComparison.OrdinalIgnoreCase));
+		if (index >= 0) {
+			paths.RemoveAt(index);
+		} else {
+			paths.Insert(0, path);
+		}
+	}
+
+	protected static string FormatPathForMenu(string path) {
+		return path.Replace("/", " › ");
 	}
 
 	private static Rect GetCameraGizmoRect(Rect viewportRect) {

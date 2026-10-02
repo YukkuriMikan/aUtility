@@ -15,8 +15,12 @@ public class MotionBrowser : AssetBrowserWindow<MotionBrowser.Entry, MotionBrows
 	private const string CacheFileName = "motion_cache.txt";
 	private const string FavoritesFileName = "motion_favorites.txt";
 	private const string PreviewModelKey = "MotionBrowser.PreviewModelPath";
+	private const string PreviewModelHistoryKey = "MotionBrowser.PreviewModelHistory";
+	private const string PreviewModelFavoritesKey = "MotionBrowser.PreviewModelFavorites";
 	private const string PreloadKey = "MotionBrowser.Preload";
 	private const string HumanoidFallbackPath = "Avatar/DefaultAvatar.fbx";
+	private const string BuiltinPreviewModelId = "builtin:DefaultAvatar";
+	private const int MaxPreviewModelHistory = 16;
 	private static readonly MethodInfo InstantiateForAnimatorPreviewMethod = typeof(EditorUtility).GetMethod(
 		"InstantiateForAnimatorPreview",
 		BindingFlags.Static | BindingFlags.NonPublic,
@@ -25,6 +29,8 @@ public class MotionBrowser : AssetBrowserWindow<MotionBrowser.Entry, MotionBrows
 		null);
 
 	private GameObject _previewModel;
+	private readonly List<string> _previewModelHistory = new();
+	private readonly List<string> _previewModelFavorites = new();
 	private bool _preloadEnabled;
 	private int _preloadIndex;
 	private static string _cacheFilePath;
@@ -69,6 +75,11 @@ public class MotionBrowser : AssetBrowserWindow<MotionBrowser.Entry, MotionBrows
 		if (_previewModel == null && !string.IsNullOrEmpty(previewModelPath)) {
 			EditorPrefs.DeleteKey(PreviewModelKey);
 		}
+		LoadStoredPathList(PreviewModelHistoryKey, _previewModelHistory);
+		LoadStoredPathList(PreviewModelFavoritesKey, _previewModelFavorites);
+		PrunePreviewModelList(_previewModelHistory, PreviewModelHistoryKey);
+		PrunePreviewModelList(_previewModelFavorites, PreviewModelFavoritesKey);
+		RememberPreviewModel();
 
 		base.OnEnable();
 	}
@@ -136,6 +147,32 @@ public class MotionBrowser : AssetBrowserWindow<MotionBrowser.Entry, MotionBrows
 					SetPreviewModel(null);
 				}
 			}
+		}
+
+		using (new EditorGUILayout.HorizontalScope(EditorStyles.toolbar)) {
+			GUILayout.Label(new GUIContent("Avatar Lists",
+				"プレビューモデルの履歴とお気に入りです。"), EditorStyles.miniLabel, GUILayout.Width(115f));
+
+			var previewModelId = GetPreviewModelId();
+			var isFavorite = ContainsStoredPath(_previewModelFavorites, previewModelId);
+			var newIsFavorite = GUILayout.Toggle(isFavorite,
+				new GUIContent(isFavorite ? "★" : "☆", "現在のプレビューモデルをお気に入りに追加または削除します。"),
+				EditorStyles.toolbarButton, GUILayout.Width(28f));
+			if (newIsFavorite != isFavorite) {
+				ToggleStoredPath(_previewModelFavorites, previewModelId);
+				SaveStoredPathList(PreviewModelFavoritesKey, _previewModelFavorites);
+			}
+
+			if (GUILayout.Button("History ▾", EditorStyles.toolbarDropDown, GUILayout.Width(75f))) {
+				ShowPreviewModelMenu(_previewModelHistory, PreviewModelHistoryKey, "No Preview Model History");
+			}
+
+			if (GUILayout.Button("Favorites ▾", EditorStyles.toolbarDropDown, GUILayout.Width(85f))) {
+				ShowPreviewModelMenu(_previewModelFavorites, PreviewModelFavoritesKey,
+					"No Favorite Preview Models");
+			}
+
+			GUILayout.FlexibleSpace();
 		}
 	}
 
@@ -469,6 +506,67 @@ public class MotionBrowser : AssetBrowserWindow<MotionBrowser.Entry, MotionBrows
 		       model.GetComponentInChildren<Renderer>(true) != null;
 	}
 
+	private string GetPreviewModelId() {
+		return _previewModel == null ? BuiltinPreviewModelId : AssetDatabase.GetAssetPath(_previewModel);
+	}
+
+	private void RememberPreviewModel() {
+		AddRecentStoredPath(_previewModelHistory, GetPreviewModelId(), MaxPreviewModelHistory);
+		SaveStoredPathList(PreviewModelHistoryKey, _previewModelHistory);
+	}
+
+	private void ShowPreviewModelMenu(List<string> modelIds, string prefsKey, string emptyMessage) {
+		PrunePreviewModelList(modelIds, prefsKey);
+		var currentId = GetPreviewModelId();
+		var menu = new GenericMenu();
+		if (modelIds.Count == 0) {
+			menu.AddDisabledItem(new GUIContent(emptyMessage));
+		} else {
+			foreach (var storedId in modelIds) {
+				var modelId = storedId;
+				menu.AddItem(new GUIContent(GetPreviewModelMenuLabel(modelId)),
+					string.Equals(modelId, currentId, StringComparison.OrdinalIgnoreCase),
+					() => SelectPreviewModel(modelId));
+			}
+		}
+
+		menu.ShowAsContext();
+	}
+
+	private void SelectPreviewModel(string modelId) {
+		if (string.Equals(modelId, BuiltinPreviewModelId, StringComparison.Ordinal)) {
+			SetPreviewModel(null);
+			return;
+		}
+
+		var model = AssetDatabase.LoadAssetAtPath<GameObject>(modelId);
+		if (IsValidPreviewModel(model)) {
+			SetPreviewModel(model);
+		}
+	}
+
+	private void PrunePreviewModelList(List<string> modelIds, string prefsKey) {
+		if (modelIds.RemoveAll(modelId => !IsValidPreviewModelId(modelId)) > 0) {
+			SaveStoredPathList(prefsKey, modelIds);
+		}
+	}
+
+	private static bool IsValidPreviewModelId(string modelId) {
+		if (string.Equals(modelId, BuiltinPreviewModelId, StringComparison.Ordinal)) {
+			return true;
+		}
+
+		return IsValidPreviewModel(AssetDatabase.LoadAssetAtPath<GameObject>(modelId));
+	}
+
+	private static string GetPreviewModelMenuLabel(string modelId) {
+		if (string.Equals(modelId, BuiltinPreviewModelId, StringComparison.Ordinal)) {
+			return "Unity Built-in DefaultAvatar";
+		}
+
+		return $"{Path.GetFileNameWithoutExtension(modelId)} — {FormatPathForMenu(modelId)}";
+	}
+
 	private void SetPreviewModel(GameObject model) {
 		if (model != null && !IsValidPreviewModel(model)) {
 			EditorUtility.DisplayDialog("Invalid Preview Model",
@@ -486,6 +584,7 @@ public class MotionBrowser : AssetBrowserWindow<MotionBrowser.Entry, MotionBrows
 		} else {
 			EditorPrefs.SetString(PreviewModelKey, AssetDatabase.GetAssetPath(_previewModel));
 		}
+		RememberPreviewModel();
 
 		ReleaseAllLivePreviews();
 		_preloadIndex = 0;
