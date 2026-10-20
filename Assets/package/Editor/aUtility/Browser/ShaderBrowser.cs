@@ -13,11 +13,13 @@ public class ShaderBrowser : AssetBrowserWindow<ShaderBrowser.Entry, ShaderBrows
 	private const string ShowShaderBallKey = "ShaderBrowser.ShowShaderBall";
 	private const string ShowSurfaceKey = "ShaderBrowser.ShowSurface";
 	private const string ShowUguiKey = "ShaderBrowser.ShowUgui";
-	private const string ShaderBallPath =
+	private const string ShaderBallGuid = "bceb74a43bc34eb5b669a8675b694d9a";
+	private const string LegacyShaderBallPath =
 		"Assets/package/Editor/aUtility/Browser/ShaderBrowserAssets/ShaderBall.fbx";
 
 	private static string _cacheFilePath;
 	private static string _favoritesFilePath;
+	private static string _shaderBallPath;
 	private GUIStyle _previewTypeStyle;
 	private bool _showShaderBall = true;
 	private bool _showSurface = true;
@@ -131,7 +133,23 @@ public class ShaderBrowser : AssetBrowserWindow<ShaderBrowser.Entry, ShaderBrows
 	}
 
 	protected override GameObject LoadPrefabForPreview(Entry entry) {
-		return AssetDatabase.LoadAssetAtPath<GameObject>(ShaderBallPath);
+		return AssetDatabase.LoadAssetAtPath<GameObject>(GetShaderBallPath());
+	}
+
+	private static string GetShaderBallPath() {
+		if (!string.IsNullOrEmpty(_shaderBallPath) &&
+		    AssetDatabase.LoadAssetAtPath<GameObject>(_shaderBallPath) != null) {
+			return _shaderBallPath;
+		}
+
+		// UPM で導入した場合は Packages/com.anest.autility 以下へ配置されるため、
+		// Assets/package 固定ではなく同梱 FBX の GUID から実際のパスを解決する。
+		_shaderBallPath = AssetDatabase.GUIDToAssetPath(ShaderBallGuid);
+		if (string.IsNullOrEmpty(_shaderBallPath)) {
+			_shaderBallPath = LegacyShaderBallPath;
+		}
+
+		return _shaderBallPath;
 	}
 
 	protected override GameObject InstantiatePreviewObject(Entry entry, GameObject prefab) {
