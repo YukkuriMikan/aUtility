@@ -57,6 +57,8 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	private string _searchRoot = DefaultSearchRoot;
 	protected bool _filterDirty = true;
 	protected bool _favoritesOnly;
+	private bool _showUsedAssets = true;
+	private bool _showUnusedAssets = true;
 	protected readonly HashSet<string> _favorites = new(StringComparer.Ordinal);
 	protected readonly Dictionary<string, List<string>> _entryTags = new(StringComparer.Ordinal);
 	protected PreviewRenderUtility _previewUtility;
@@ -65,6 +67,8 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	private GUIContent _usedAssetContent;
 	private GUIContent _unusedAssetContent;
 	private GUIContent _usageScanningContent;
+	private GUIContent _showUsedAssetsContent;
+	private GUIContent _showUnusedAssetsContent;
 	private GUIStyle _usageBadgeStyle;
 	private double _lastUpdateTime;
 	private bool _usageScanComplete;
@@ -142,6 +146,8 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 
 	protected virtual void OnEnable() {
 		EditorApplication.projectChanged += HandleProjectChanged;
+		_showUsedAssets = EditorPrefs.GetBool(PrefsKeyPrefix + ".ShowUsedAssets", true);
+		_showUnusedAssets = EditorPrefs.GetBool(PrefsKeyPrefix + ".ShowUnusedAssets", true);
 		var searchRootKey = PrefsKeyPrefix + ".SearchRoot";
 		var storedSearchRoot = NormalizeAssetPath(EditorPrefs.GetString(searchRootKey, DefaultSearchRoot));
 		var searchRootInvalid = !IsValidSearchRoot(storedSearchRoot);
@@ -312,6 +318,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		}
 
 		_usageScanComplete = _usageSceneScanQueue.Count == 0;
+		_filterDirty = true;
 		Repaint();
 	}
 
@@ -341,6 +348,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 					entry.UsageScenePaths.Sort(StringComparer.OrdinalIgnoreCase);
 				}
 			}
+			_filterDirty = true;
 		}
 		Repaint();
 	}
@@ -358,6 +366,13 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		foreach (var entry in _entries) {
 			if (_favoritesOnly && !_favorites.Contains(entry.Guid)) {
 				continue;
+			}
+
+			if (SupportsSceneUsage && _usageScanComplete) {
+				var isUsed = entry.UsageScenePaths.Count > 0;
+				if ((isUsed && !_showUsedAssets) || (!isUsed && !_showUnusedAssets)) {
+					continue;
+				}
 			}
 
 			if (!PassesTypeFilter(entry)) {
@@ -485,6 +500,34 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		}
 	}
 
+	private void DrawSceneUsageToolbarFilters() {
+		if (!SupportsSceneUsage) {
+			return;
+		}
+
+		GUILayout.Space(8f);
+		_showUsedAssetsContent ??= new GUIContent("使用", "シーンで使用されているアセットを表示します。");
+		_showUnusedAssetsContent ??= new GUIContent("未使用", "シーンで使用されていないアセットを表示します。");
+
+		var newShowUsedAssets = GUILayout.Toggle(_showUsedAssets, _showUsedAssetsContent,
+			EditorStyles.toolbarButton, GUILayout.Width(48f));
+		if (newShowUsedAssets != _showUsedAssets) {
+			_showUsedAssets = newShowUsedAssets;
+			EditorPrefs.SetBool(PrefsKeyPrefix + ".ShowUsedAssets", _showUsedAssets);
+			_filterDirty = true;
+			_scrollPosition = Vector2.zero;
+		}
+
+		var newShowUnusedAssets = GUILayout.Toggle(_showUnusedAssets, _showUnusedAssetsContent,
+			EditorStyles.toolbarButton, GUILayout.Width(58f));
+		if (newShowUnusedAssets != _showUnusedAssets) {
+			_showUnusedAssets = newShowUnusedAssets;
+			EditorPrefs.SetBool(PrefsKeyPrefix + ".ShowUnusedAssets", _showUnusedAssets);
+			_filterDirty = true;
+			_scrollPosition = Vector2.zero;
+		}
+	}
+
 	private void DrawSearchRootToolbar() {
 		using (new EditorGUILayout.HorizontalScope(EditorStyles.toolbar)) {
 			GUILayout.Label(new GUIContent("Search Root",
@@ -492,6 +535,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 				GUILayout.Width(105f));
 			GUILayout.Label(_searchRoot, EditorStyles.miniLabel);
 			GUILayout.FlexibleSpace();
+			DrawSceneUsageToolbarFilters();
 
 			var isFavorite = ContainsStoredPath(_searchRootFavorites, _searchRoot);
 			var newIsFavorite = GUILayout.Toggle(isFavorite,
