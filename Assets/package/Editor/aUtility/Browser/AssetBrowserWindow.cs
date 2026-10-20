@@ -120,8 +120,10 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		return prefab == null ? null : _previewUtility.InstantiatePrefabInScene(prefab);
 	}
 	protected virtual bool KeepInvisibleLivePreviews => false;
+	protected virtual bool ShowPlaybackToolbar => true;
 	protected virtual double PreviewUpdateInterval => 0d;
 	protected virtual bool ShouldAdvanceLivePreview(TEntry entry, TLivePreview live) => true;
+	protected virtual bool ShouldShowGround(TEntry entry, TLivePreview live) => true;
 	protected virtual void UpdateBackgroundWork() { }
 	protected virtual void OnEntriesChanged() { }
 	protected bool IsEntryVisible(TEntry entry) => _visibleEntries.Contains(entry);
@@ -320,18 +322,21 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 				_scrollPosition = Vector2.zero;
 			}
 
-			GUILayout.Space(8f);
+			if (ShowPlaybackToolbar) {
+				GUILayout.Space(8f);
 
-			if (GUILayout.Button(GetToolbarContent(RestartButtonLabel, "PlayButton",
-				    "すべてのプレビューを先頭から再生します。"), EditorStyles.toolbarButton, GUILayout.Width(70f))) {
-				RestartAllLivePreviews();
-			}
+				if (GUILayout.Button(GetToolbarContent(RestartButtonLabel, "PlayButton",
+					    "すべてのプレビューを先頭から再生します。"), EditorStyles.toolbarButton,
+				    GUILayout.Width(70f))) {
+					RestartAllLivePreviews();
+				}
 
-			var pauseContent = _paused
-				? GetToolbarContent("Resume", "PlayButton", "プレビューの再生を再開します。")
-				: GetToolbarContent("Pause", "PauseButton", "プレビューの再生を一時停止します。");
-			if (GUILayout.Button(pauseContent, EditorStyles.toolbarButton, GUILayout.Width(70f))) {
-				_paused = !_paused;
+				var pauseContent = _paused
+					? GetToolbarContent("Resume", "PlayButton", "プレビューの再生を再開します。")
+					: GetToolbarContent("Pause", "PauseButton", "プレビューの再生を一時停止します。");
+				if (GUILayout.Button(pauseContent, EditorStyles.toolbarButton, GUILayout.Width(70f))) {
+					_paused = !_paused;
+				}
 			}
 
 			var groundContent = new GUIContent(_groundEnabled ? "Ground ON" : "Ground OFF",
@@ -360,14 +365,17 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 
 			GUILayout.FlexibleSpace();
 
-			GUILayout.Label("Speed", EditorStyles.miniLabel);
-			var newSpeed = GUILayout.HorizontalSlider(_playbackSpeed, 0f, MaxPlaybackSpeed, GUILayout.Width(100f));
-			if (!Mathf.Approximately(newSpeed, _playbackSpeed)) {
-				_playbackSpeed = newSpeed;
-				EditorPrefs.SetFloat(PrefsKeyPrefix + ".PlaybackSpeed", _playbackSpeed);
-			}
+			if (ShowPlaybackToolbar) {
+				GUILayout.Label("Speed", EditorStyles.miniLabel);
+				var newSpeed = GUILayout.HorizontalSlider(_playbackSpeed, 0f, MaxPlaybackSpeed,
+					GUILayout.Width(100f));
+				if (!Mathf.Approximately(newSpeed, _playbackSpeed)) {
+					_playbackSpeed = newSpeed;
+					EditorPrefs.SetFloat(PrefsKeyPrefix + ".PlaybackSpeed", _playbackSpeed);
+				}
 
-			GUILayout.Space(8f);
+				GUILayout.Space(8f);
+			}
 
 			GUILayout.Label("Distance", EditorStyles.miniLabel);
 			var newDistance = GUILayout.HorizontalSlider(_cameraDistance, 1f, MaxCameraDistance,
@@ -1238,20 +1246,11 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 			return null;
 		}
 
-		var bounds = new Bounds(live.Origin, Vector3.one);
-		var hasBounds = false;
-		foreach (var renderer in live.Renderers) {
-			if (!hasBounds) {
-				bounds = renderer.bounds;
-				hasBounds = true;
-			} else {
-				bounds.Encapsulate(renderer.bounds);
-			}
-		}
+		var bounds = GetPreviewBounds(entry, live);
 
 		var radius = Mathf.Max(0.5f, bounds.extents.magnitude);
 		live.Radius = Mathf.Max(live.Radius, radius);
-		UpdatePreviewGround(live, bounds);
+		UpdatePreviewGround(entry, live, bounds);
 
 		_previewUtility.BeginPreview(rect, GUIStyle.none);
 		var previewCamera = _previewUtility.camera;
@@ -1272,8 +1271,23 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		return _previewUtility.EndPreview();
 	}
 
-	private void UpdatePreviewGround(TLivePreview live, Bounds bounds) {
-		if (!_groundEnabled) {
+	protected virtual Bounds GetPreviewBounds(TEntry entry, TLivePreview live) {
+		var bounds = new Bounds(live.Origin, Vector3.one);
+		var hasBounds = false;
+		foreach (var renderer in live.Renderers) {
+			if (!hasBounds) {
+				bounds = renderer.bounds;
+				hasBounds = true;
+			} else {
+				bounds.Encapsulate(renderer.bounds);
+			}
+		}
+
+		return bounds;
+	}
+
+	private void UpdatePreviewGround(TEntry entry, TLivePreview live, Bounds bounds) {
+		if (!_groundEnabled || !ShouldShowGround(entry, live)) {
 			DestroyPreviewGround(live);
 			return;
 		}
