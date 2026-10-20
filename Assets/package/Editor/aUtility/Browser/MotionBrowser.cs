@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using UnityEditor;
+using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.Animations;
 using UnityEngine.Playables;
@@ -31,6 +32,7 @@ public class MotionBrowser : AssetBrowserWindow<MotionBrowser.Entry, MotionBrows
 	private GameObject _previewModel;
 	private readonly List<string> _previewModelHistory = new();
 	private readonly List<string> _previewModelFavorites = new();
+	private readonly HashSet<string> _motionAssetPaths = new(StringComparer.OrdinalIgnoreCase);
 	private bool _preloadEnabled;
 	private int _preloadIndex;
 	private static string _cacheFilePath;
@@ -58,6 +60,8 @@ public class MotionBrowser : AssetBrowserWindow<MotionBrowser.Entry, MotionBrows
 	protected override string ExportFavoritesDialogTitle => "Export Favorite Motions";
 	protected override string ExportFavoritesDefaultFileName => "MotionFavorites.unitypackage";
 	protected override string ExportFavoritesEmptyMessage => "お気に入りに登録されたモーションがありません。";
+	protected override bool SupportsSceneUsage => true;
+	protected override string GetSceneUsageEntryKey(Entry entry) => entry.Guid;
 
 	[MenuItem("Tools/Motion Browser")]
 	private static void OpenWindow() {
@@ -209,6 +213,152 @@ public class MotionBrowser : AssetBrowserWindow<MotionBrowser.Entry, MotionBrows
 
 	protected override void OnEntriesChanged() {
 		_preloadIndex = 0;
+		_motionAssetPaths.Clear();
+		foreach (var entry in _entries) {
+			_motionAssetPaths.Add(entry.AssetPath);
+		}
+	}
+
+	protected override IEnumerable<string> GetSceneUsageKeys(string scenePath) {
+		var scene = SceneManager.GetSceneByPath(scenePath);
+		var closePreviewScene = !scene.IsValid() || !scene.isLoaded;
+		if (closePreviewScene) {
+			var sceneDependencies = AssetDatabase.GetDependencies(scenePath, true);
+			if (!Array.Exists(sceneDependencies, dependencyPath => _motionAssetPaths.Contains(dependencyPath))) {
+				return Array.Empty<string>();
+			}
+
+			try {
+				scene = EditorSceneManager.OpenPreviewScene(scenePath);
+			} catch (Exception exception) {
+				Debug.LogWarning($"Motion Browser: シーンを読み込めませんでした: {scenePath}\n{exception.Message}");
+				return Array.Empty<string>();
+			}
+		}
+
+		try {
+			var usageKeys = new HashSet<string>(StringComparer.Ordinal);
+			var referencedAssetCache = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+			foreach (var root in scene.GetRootGameObjects()) {
+				CollectSceneMotionUsage(root.transform, usageKeys, referencedAssetCache);
+			}
+
+			return usageKeys;
+		} finally {
+			if (closePreviewScene && scene.IsValid()) {
+				EditorSceneManager.ClosePreviewScene(scene);
+			}
+		}
+	}
+
+	private static void CollectSceneMotionUsage(Transform transform, HashSet<string> usageKeys,
+		Dictionary<string, List<string>> referencedAssetCache) {
+		var gameObject = transform.gameObject;
+		var animator = gameObject.GetComponent<Animator>();
+		if (animator != null && animator.runtimeAnimatorController != null) {
+			CollectControllerClips(animator.runtimeAnimatorController, usageKeys);
+		}
+
+		var legacyAnimation = gameObject.GetComponent<Animation>();
+		if (legacyAnimation != null) {
+			foreach (AnimationState state in legacyAnimation) {
+				AddClipUsageKey(state.clip, usageKeys);
+			}
+		}
+
+		foreach (var component in gameObject.GetComponents<Component>()) {
+			if (component == null) {
+				continue;
+			}
+
+			try {
+				var serializedObject = new SerializedObject(component);
+				var property = serializedObject.GetIterator();
+				while (property.Next(true)) {
+					if (property.propertyType != SerializedPropertyType.ObjectReference) {
+						continue;
+					}
+
+					var referencedObject = property.objectReferenceValue;
+					if (referencedObject is AnimationClip clip) {
+						AddClipUsageKey(clip, usageKeys);
+					} else if (referencedObject is RuntimeAnimatorController controller) {
+						CollectControllerClips(controller, usageKeys);
+					} else if (referencedObject is ScriptableObject) {
+						CollectReferencedAssetClips(referencedObject, usageKeys, referencedAssetCache);
+					}
+				}
+			} catch (Exception) {
+				// Missing scripts and some native components do not expose serializable properties.
+			}
+		}
+
+		for (var childIndex = 0; childIndex < transform.childCount; childIndex++) {
+			CollectSceneMotionUsage(transform.GetChild(childIndex), usageKeys, referencedAssetCache);
+		}
+	}
+
+	private static void CollectControllerClips(RuntimeAnimatorController controller, HashSet<string> usageKeys) {
+		foreach (var clip in controller.animationClips) {
+			AddClipUsageKey(clip, usageKeys);
+		}
+	}
+
+	private static void CollectReferencedAssetClips(UnityEngine.Object referencedObject,
+		HashSet<string> usageKeys, Dictionary<string, List<string>> referencedAssetCache) {
+		var assetPath = AssetDatabase.GetAssetPath(referencedObject);
+		if (string.IsNullOrEmpty(assetPath) || assetPath.EndsWith(".unity", StringComparison.OrdinalIgnoreCase)) {
+			return;
+		}
+
+		if (!referencedAssetCache.TryGetValue(assetPath, out var cachedKeys)) {
+			var foundKeys = new HashSet<string>(StringComparer.Ordinal);
+			foreach (var asset in AssetDatabase.LoadAllAssetsAtPath(assetPath)) {
+				if (asset is AnimationClip clip) {
+					AddClipUsageKey(clip, foundKeys);
+				}
+
+				if (asset is RuntimeAnimatorController controller) {
+					CollectControllerClips(controller, foundKeys);
+				}
+
+				try {
+					var serializedObject = new SerializedObject(asset);
+					var property = serializedObject.GetIterator();
+					while (property.Next(true)) {
+						if (property.propertyType == SerializedPropertyType.ObjectReference &&
+						    property.objectReferenceValue is AnimationClip referencedClip) {
+							AddClipUsageKey(referencedClip, foundKeys);
+						}
+					}
+				} catch (Exception) {
+					// Continue checking other sub-assets when one imported object cannot be serialized.
+				}
+			}
+
+			cachedKeys = new List<string>(foundKeys);
+			referencedAssetCache.Add(assetPath, cachedKeys);
+		}
+
+		foreach (var key in cachedKeys) {
+			usageKeys.Add(key);
+		}
+	}
+
+	private static void AddClipUsageKey(AnimationClip clip, HashSet<string> usageKeys) {
+		if (clip == null) {
+			return;
+		}
+
+		usageKeys.Add(GetClipStableId(AssetDatabase.GetAssetPath(clip), clip));
+	}
+
+	private static string GetClipStableId(string assetPath, AnimationClip clip) {
+		if (AssetDatabase.TryGetGUIDAndLocalFileIdentifier(clip, out var guid, out long localId)) {
+			return $"{guid}:{localId}";
+		}
+
+		return $"{AssetDatabase.AssetPathToGUID(assetPath)}:{clip.name}";
 	}
 
 	protected override bool PassesTypeFilter(Entry entry) {
@@ -606,17 +756,9 @@ public class MotionBrowser : AssetBrowserWindow<MotionBrowser.Entry, MotionBrows
 		public readonly AnimationClip Clip;
 		public readonly long LocalId;
 
-		public Entry(string assetPath, AnimationClip clip) : base(assetPath, GetStableId(assetPath, clip)) {
+		public Entry(string assetPath, AnimationClip clip) : base(assetPath, GetClipStableId(assetPath, clip)) {
 			Clip = clip;
 			AssetDatabase.TryGetGUIDAndLocalFileIdentifier(clip, out _, out LocalId);
-		}
-
-		private static string GetStableId(string assetPath, AnimationClip clip) {
-			if (AssetDatabase.TryGetGUIDAndLocalFileIdentifier(clip, out var guid, out long localId)) {
-				return $"{guid}:{localId}";
-			}
-
-			return $"{AssetDatabase.AssetPathToGUID(assetPath)}:{clip.name}";
 		}
 	}
 }

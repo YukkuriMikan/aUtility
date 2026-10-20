@@ -137,6 +137,9 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	protected virtual bool ShowPlaybackToolbar => true;
 	protected virtual bool SupportsSceneUsage => false;
 	protected virtual bool UsageMatchesReferencedAssetDependencies => false;
+	protected virtual string GetSceneUsageEntryKey(TEntry entry) => entry.AssetPath;
+	protected virtual IEnumerable<string> GetSceneUsageKeys(string scenePath) =>
+		AssetDatabase.GetDependencies(scenePath, true);
 	protected virtual double PreviewUpdateInterval => 0d;
 	protected virtual bool ShouldAdvanceLivePreview(TEntry entry, TLivePreview live) => true;
 	protected virtual bool ShouldShowGround(TEntry entry, TLivePreview live) => true;
@@ -301,9 +304,14 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 				continue;
 			}
 
-			if (!_entriesByUsageAssetPath.TryGetValue(entry.AssetPath, out var entries)) {
+			var usageKey = GetSceneUsageEntryKey(entry);
+			if (string.IsNullOrEmpty(usageKey)) {
+				continue;
+			}
+
+			if (!_entriesByUsageAssetPath.TryGetValue(usageKey, out var entries)) {
 				entries = new List<TEntry>();
-				_entriesByUsageAssetPath.Add(entry.AssetPath, entries);
+				_entriesByUsageAssetPath.Add(usageKey, entries);
 			}
 			entries.Add(entry);
 		}
@@ -329,8 +337,8 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		}
 
 		var scenePath = _usageSceneScanQueue.Dequeue();
-		foreach (var dependencyPath in AssetDatabase.GetDependencies(scenePath, true)) {
-			if (!_entriesByUsageAssetPath.TryGetValue(dependencyPath, out var entries)) {
+		foreach (var usageKey in GetSceneUsageKeys(scenePath)) {
+			if (!_entriesByUsageAssetPath.TryGetValue(usageKey, out var entries)) {
 				continue;
 			}
 
@@ -2234,6 +2242,10 @@ public class AssetBrowserUsageWindow : EditorWindow {
 
 	private static bool GameObjectUsesAsset(GameObject gameObject, UnityEngine.Object targetAsset,
 		string targetAssetPath, bool matchReferencedAssetDependencies, Dictionary<string, bool> dependencyCache) {
+		if (targetAsset is AnimationClip targetClip && GameObjectUsesAnimationClip(gameObject, targetClip)) {
+			return true;
+		}
+
 		var nearestPrefabRoot = PrefabUtility.GetNearestPrefabInstanceRoot(gameObject);
 		if (nearestPrefabRoot == gameObject && string.Equals(
 			    PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(gameObject), targetAssetPath,
@@ -2265,6 +2277,28 @@ public class AssetBrowserUsageWindow : EditorWindow {
 		return false;
 	}
 
+	private static bool GameObjectUsesAnimationClip(GameObject gameObject, AnimationClip targetClip) {
+		var animator = gameObject.GetComponent<Animator>();
+		if (animator != null && animator.runtimeAnimatorController != null) {
+			foreach (var clip in animator.runtimeAnimatorController.animationClips) {
+				if (IsSameAssetObject(clip, targetClip)) {
+					return true;
+				}
+			}
+		}
+
+		var legacyAnimation = gameObject.GetComponent<Animation>();
+		if (legacyAnimation != null) {
+			foreach (AnimationState state in legacyAnimation) {
+				if (IsSameAssetObject(state.clip, targetClip)) {
+					return true;
+				}
+			}
+		}
+
+		return false;
+	}
+
 	private static bool ReferencedObjectUsesAsset(UnityEngine.Object referencedObject,
 		UnityEngine.Object targetAsset, string targetAssetPath, bool matchReferencedAssetDependencies,
 		Dictionary<string, bool> dependencyCache) {
@@ -2272,8 +2306,13 @@ public class AssetBrowserUsageWindow : EditorWindow {
 			return false;
 		}
 
-		if (referencedObject == targetAsset ||
+		if (IsSameAssetObject(referencedObject, targetAsset) ||
 		    targetAsset is Shader shader && referencedObject is Material material && material.shader == shader) {
+			return true;
+		}
+
+		if (targetAsset is AnimationClip targetClip &&
+		    ReferencedAssetUsesAnimationClip(referencedObject, targetClip, dependencyCache)) {
 			return true;
 		}
 
@@ -2298,6 +2337,74 @@ public class AssetBrowserUsageWindow : EditorWindow {
 		}
 
 		return usesAsset;
+	}
+
+	private static bool ReferencedAssetUsesAnimationClip(UnityEngine.Object referencedObject,
+		AnimationClip targetClip, Dictionary<string, bool> dependencyCache) {
+		if (referencedObject is RuntimeAnimatorController controller) {
+			foreach (var clip in controller.animationClips) {
+				if (IsSameAssetObject(clip, targetClip)) {
+					return true;
+				}
+			}
+		}
+
+		if (referencedObject is not RuntimeAnimatorController && referencedObject is not ScriptableObject) {
+			return false;
+		}
+
+		var referencedPath = AssetDatabase.GetAssetPath(referencedObject);
+		if (string.IsNullOrEmpty(referencedPath) ||
+		    referencedPath.EndsWith(".unity", StringComparison.OrdinalIgnoreCase)) {
+			return false;
+		}
+
+		if (dependencyCache.TryGetValue(referencedPath, out var usesClip)) {
+			return usesClip;
+		}
+
+		usesClip = false;
+		foreach (var asset in AssetDatabase.LoadAllAssetsAtPath(referencedPath)) {
+			if (IsSameAssetObject(asset, targetClip)) {
+				usesClip = true;
+				break;
+			}
+
+			try {
+				var serializedObject = new SerializedObject(asset);
+				var property = serializedObject.GetIterator();
+				while (property.Next(true)) {
+					if (property.propertyType == SerializedPropertyType.ObjectReference &&
+					    IsSameAssetObject(property.objectReferenceValue, targetClip)) {
+						usesClip = true;
+						break;
+					}
+				}
+			} catch (Exception) {
+				// Some imported sub-assets do not expose a SerializedObject. Other assets in the file are still checked.
+			}
+
+			if (usesClip) {
+				break;
+			}
+		}
+
+		dependencyCache.Add(referencedPath, usesClip);
+		return usesClip;
+	}
+
+	private static bool IsSameAssetObject(UnityEngine.Object left, UnityEngine.Object right) {
+		if (left == right) {
+			return true;
+		}
+
+		if (left == null || right == null ||
+		    !AssetDatabase.TryGetGUIDAndLocalFileIdentifier(left, out var leftGuid, out long leftLocalId) ||
+		    !AssetDatabase.TryGetGUIDAndLocalFileIdentifier(right, out var rightGuid, out long rightLocalId)) {
+			return false;
+		}
+
+		return leftLocalId == rightLocalId && string.Equals(leftGuid, rightGuid, StringComparison.Ordinal);
 	}
 
 	private static string GetHierarchyPath(Transform transform) {
