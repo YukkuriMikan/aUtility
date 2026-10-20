@@ -45,6 +45,8 @@ public class ShaderBrowser : AssetBrowserWindow<ShaderBrowser.Entry, ShaderBrows
 	protected override string ExportFavoritesDefaultFileName => "ShaderFavorites.unitypackage";
 	protected override string ExportFavoritesEmptyMessage => "お気に入りに登録されたシェーダーがありません。";
 	protected override bool ShowPlaybackToolbar => false;
+	protected override bool SupportsSceneUsage => true;
+	protected override bool UsageMatchesReferencedAssetDependencies => true;
 	protected override double PreviewUpdateInterval => 1d;
 
 	[MenuItem("Tools/Shader Browser")]

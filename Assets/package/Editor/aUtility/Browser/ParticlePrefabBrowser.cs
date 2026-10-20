@@ -32,6 +32,7 @@ public class
 	protected override string ExportFavoritesDialogTitle => "Export Favorite Particle Prefabs";
 	protected override string ExportFavoritesDefaultFileName => "ParticleFavorites.unitypackage";
 	protected override string ExportFavoritesEmptyMessage => "お気に入りに登録されたプレハブがありません。";
+	protected override bool SupportsSceneUsage => true;
 
 	[MenuItem("Tools/Particle Prefab Browser")]
 	private static void OpenWindow() {

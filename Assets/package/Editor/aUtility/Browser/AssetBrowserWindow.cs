@@ -3,9 +3,11 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using UnityEditor;
+using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.Universal;
+using UnityEngine.SceneManagement;
 
 /// <summary>
 /// Generic grid-based asset browser window with search, favorites, live previews,
@@ -38,6 +40,9 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	private readonly HashSet<TEntry> _visibleEntries = new();
 	private readonly List<string> _searchRootHistory = new();
 	private readonly List<string> _searchRootFavorites = new();
+	private readonly Queue<string> _usageSceneScanQueue = new();
+	private readonly Dictionary<string, List<TEntry>> _entriesByUsageAssetPath =
+		new(StringComparer.OrdinalIgnoreCase);
 	protected Vector2 _scrollPosition;
 	protected float _previewSize;
 	protected float _cameraYaw;
@@ -57,7 +62,12 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	protected PreviewRenderUtility _previewUtility;
 	private static readonly Dictionary<string, Texture2D> ToolbarIconCache = new(StringComparer.Ordinal);
 	private Material _previewGroundMaterial;
+	private GUIContent _usedAssetContent;
+	private GUIContent _unusedAssetContent;
+	private GUIContent _usageScanningContent;
+	private GUIStyle _usageBadgeStyle;
 	private double _lastUpdateTime;
+	private bool _usageScanComplete;
 	protected bool _draggingGizmo;
 	protected bool _draggingLightGizmo;
 
@@ -121,6 +131,8 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	}
 	protected virtual bool KeepInvisibleLivePreviews => false;
 	protected virtual bool ShowPlaybackToolbar => true;
+	protected virtual bool SupportsSceneUsage => false;
+	protected virtual bool UsageMatchesReferencedAssetDependencies => false;
 	protected virtual double PreviewUpdateInterval => 0d;
 	protected virtual bool ShouldAdvanceLivePreview(TEntry entry, TLivePreview live) => true;
 	protected virtual bool ShouldShowGround(TEntry entry, TLivePreview live) => true;
@@ -129,6 +141,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	protected bool IsEntryVisible(TEntry entry) => _visibleEntries.Contains(entry);
 
 	protected virtual void OnEnable() {
+		EditorApplication.projectChanged += HandleProjectChanged;
 		var searchRootKey = PrefsKeyPrefix + ".SearchRoot";
 		var storedSearchRoot = NormalizeAssetPath(EditorPrefs.GetString(searchRootKey, DefaultSearchRoot));
 		var searchRootInvalid = !IsValidSearchRoot(storedSearchRoot);
@@ -164,6 +177,8 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	}
 
 	protected virtual void OnDisable() {
+		EditorApplication.projectChanged -= HandleProjectChanged;
+		_usageSceneScanQueue.Clear();
 		ReleaseAllLivePreviews();
 
 		if (_previewUtility != null) {
@@ -178,6 +193,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	}
 
 	private void Update() {
+		UpdateSceneUsageIndex();
 		UpdateBackgroundWork();
 
 		var now = EditorApplication.timeSinceStartup;
@@ -262,6 +278,71 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		if (isRepaint) {
 			ReleaseInvisibleLivePreviews();
 		}
+	}
+
+	private void HandleProjectChanged() {
+		QueueSceneUsageScan();
+	}
+
+	private void QueueSceneUsageScan() {
+		_usageSceneScanQueue.Clear();
+		_entriesByUsageAssetPath.Clear();
+		_usageScanComplete = false;
+
+		foreach (var entry in _entries) {
+			entry.UsageScenePaths.Clear();
+			if (!SupportsSceneUsage) {
+				continue;
+			}
+
+			if (!_entriesByUsageAssetPath.TryGetValue(entry.AssetPath, out var entries)) {
+				entries = new List<TEntry>();
+				_entriesByUsageAssetPath.Add(entry.AssetPath, entries);
+			}
+			entries.Add(entry);
+		}
+
+		if (SupportsSceneUsage) {
+			foreach (var sceneGuid in AssetDatabase.FindAssets("t:Scene", new[] { "Assets" })) {
+				var scenePath = AssetDatabase.GUIDToAssetPath(sceneGuid);
+				if (!string.IsNullOrEmpty(scenePath)) {
+					_usageSceneScanQueue.Enqueue(scenePath);
+				}
+			}
+		}
+
+		_usageScanComplete = _usageSceneScanQueue.Count == 0;
+		Repaint();
+	}
+
+	private void UpdateSceneUsageIndex() {
+		if (!SupportsSceneUsage || _usageSceneScanQueue.Count == 0 || EditorApplication.isCompiling ||
+		    EditorApplication.isUpdating) {
+			return;
+		}
+
+		var scenePath = _usageSceneScanQueue.Dequeue();
+		foreach (var dependencyPath in AssetDatabase.GetDependencies(scenePath, true)) {
+			if (!_entriesByUsageAssetPath.TryGetValue(dependencyPath, out var entries)) {
+				continue;
+			}
+
+			foreach (var entry in entries) {
+				if (!entry.UsageScenePaths.Contains(scenePath)) {
+					entry.UsageScenePaths.Add(scenePath);
+				}
+			}
+		}
+
+		_usageScanComplete = _usageSceneScanQueue.Count == 0;
+		if (_usageScanComplete) {
+			foreach (var entries in _entriesByUsageAssetPath.Values) {
+				foreach (var entry in entries) {
+					entry.UsageScenePaths.Sort(StringComparer.OrdinalIgnoreCase);
+				}
+			}
+		}
+		Repaint();
 	}
 
 	private void UpdateFilter() {
@@ -905,6 +986,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		DrawEntryFavoriteButton(previewRect, entry);
 		DrawEntryTags(previewRect, entry);
 		DrawEntryOverlay(previewRect, entry);
+		DrawEntryUsageIcon(previewRect, entry);
 
 		if (Event.current.type == EventType.MouseDown && Event.current.button == 1 &&
 		    previewRect.Contains(Event.current.mousePosition)) {
@@ -928,6 +1010,40 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 
 		EditorGUI.LabelField(labelRect, GetEntryName(entry), labelStyle);
 		DrawEntryExtraLabel(labelRect, entry);
+	}
+
+	private void DrawEntryUsageIcon(Rect previewRect, TEntry entry) {
+		if (!SupportsSceneUsage) {
+			return;
+		}
+
+		_usageBadgeStyle ??= new GUIStyle(EditorStyles.miniBoldLabel) {
+			alignment = TextAnchor.MiddleCenter,
+			clipping = TextClipping.Clip,
+			padding = new RectOffset(3, 3, 1, 1),
+			normal = { textColor = Color.white }
+		};
+		_usedAssetContent ??= new GUIContent("使用", EditorGUIUtility.IconContent("SceneAsset Icon").image,
+			"プロジェクト内のシーンで使用されています。右クリックから使用状況を確認できます。");
+		_unusedAssetContent ??= new GUIContent("未使用", "プロジェクト内のシーンからは使用されていません。");
+		_usageScanningContent ??= new GUIContent("解析中", "プロジェクト内のシーン使用状況を解析しています。");
+
+		var isUsed = entry.UsageScenePaths.Count > 0;
+		var content = !_usageScanComplete
+			? _usageScanningContent
+			: isUsed
+				? _usedAssetContent
+				: _unusedAssetContent;
+		var width = !_usageScanComplete ? 56f : isUsed ? 54f : 48f;
+		width = Mathf.Min(width, previewRect.width - 6f);
+		var badgeRect = new Rect(previewRect.center.x - (width * 0.5f), previewRect.y + 3f, width, 20f);
+		var color = !_usageScanComplete
+			? new Color(0.32f, 0.32f, 0.32f, 0.92f)
+			: isUsed
+				? new Color(0.12f, 0.5f, 0.22f, 0.92f)
+				: new Color(0.22f, 0.22f, 0.22f, 0.86f);
+		EditorGUI.DrawRect(badgeRect, color);
+		GUI.Label(badgeRect, content, _usageBadgeStyle);
 	}
 
 	private void DrawEntryPlaybackButtons(Rect previewRect, TEntry entry) {
@@ -994,8 +1110,27 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		var menu = new GenericMenu();
 		menu.AddItem(new GUIContent("Export as Asset Package..."), false, () => ExportEntryAsPackage(entry));
 		AddTagMenuItems(menu, entry);
+		AddSceneUsageMenuItems(menu, entry);
 		AddContextMenuItems(menu, entry);
 		menu.ShowAsContext();
+	}
+
+	private void AddSceneUsageMenuItems(GenericMenu menu, TEntry entry) {
+		if (!SupportsSceneUsage) {
+			return;
+		}
+
+		if (entry.UsageScenePaths.Count > 0) {
+			menu.AddSeparator(string.Empty);
+			menu.AddItem(new GUIContent("使用状況を表示..."), false, () => {
+				var target = GetSelectionObject(entry);
+				AssetBrowserUsageWindow.Open(target, entry.AssetPath, entry.UsageScenePaths,
+					UsageMatchesReferencedAssetDependencies);
+			});
+		} else if (!_usageScanComplete) {
+			menu.AddSeparator(string.Empty);
+			menu.AddDisabledItem(new GUIContent("使用状況を解析中..."));
+		}
 	}
 
 	// ---- Tags ----
@@ -1506,7 +1641,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		_entries.Sort(CompareEntries);
 		SaveCache(cacheGuids);
 		EditorPrefs.SetString(PrefsKeyPrefix + ".CachedSearchRoot", _searchRoot);
-		OnEntriesChanged();
+		NotifyEntriesChanged();
 	}
 
 	protected static GUIContent GetToolbarContent(string text, string iconName, string tooltip) {
@@ -1525,7 +1660,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 
 		var cacheFilePath = CacheFilePath;
 		if (string.IsNullOrEmpty(cacheFilePath) || !File.Exists(cacheFilePath)) {
-			OnEntriesChanged();
+			NotifyEntriesChanged();
 			return;
 		}
 
@@ -1543,6 +1678,11 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		}
 
 		_entries.Sort(CompareEntries);
+		NotifyEntriesChanged();
+	}
+
+	private void NotifyEntriesChanged() {
+		QueueSceneUsageScan();
 		OnEntriesChanged();
 	}
 
@@ -1843,6 +1983,7 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 	public class EntryBase {
 		public readonly string AssetPath;
 		public readonly string Guid;
+		public readonly List<string> UsageScenePaths = new();
 		public Texture2D Preview;
 		public bool PreviewFailed;
 
@@ -1867,5 +2008,261 @@ public abstract class AssetBrowserWindow<TEntry, TLivePreview> : EditorWindow
 		public string Guid;
 		public string SourcePath;
 		public string TargetPath;
+	}
+}
+
+public class AssetBrowserUsageWindow : EditorWindow {
+	private sealed class SceneUsage {
+		public string ScenePath;
+		public readonly List<string> ObjectPaths = new();
+	}
+
+	[SerializeField]
+	private UnityEngine.Object _targetAsset;
+	[SerializeField]
+	private string _targetAssetPath;
+	[SerializeField]
+	private bool _matchReferencedAssetDependencies;
+	private readonly List<string> _candidateScenePaths = new();
+	private readonly List<SceneUsage> _sceneUsages = new();
+	private Vector2 _scrollPosition;
+	private bool _isScanning;
+	private bool _scanWasCanceled;
+
+	public static void Open(UnityEngine.Object targetAsset, string targetAssetPath,
+		IReadOnlyList<string> scenePaths, bool matchReferencedAssetDependencies) {
+		if (targetAsset == null || string.IsNullOrEmpty(targetAssetPath)) {
+			return;
+		}
+
+		var window = CreateInstance<AssetBrowserUsageWindow>();
+		window.titleContent = new GUIContent("Asset Usage");
+		window.minSize = new Vector2(520f, 300f);
+		window._targetAsset = targetAsset;
+		window._targetAssetPath = targetAssetPath;
+		window._matchReferencedAssetDependencies = matchReferencedAssetDependencies;
+		window._candidateScenePaths.AddRange(scenePaths);
+		window.Show();
+		window.Focus();
+		EditorApplication.delayCall += window.RefreshUsage;
+	}
+
+	private void OnGUI() {
+		using (new EditorGUILayout.HorizontalScope(EditorStyles.toolbar)) {
+			using (new EditorGUI.DisabledScope(true)) {
+				EditorGUILayout.ObjectField(_targetAsset, typeof(UnityEngine.Object), false, GUILayout.MinWidth(180f));
+			}
+
+			GUILayout.FlexibleSpace();
+			using (new EditorGUI.DisabledScope(_isScanning || _targetAsset == null)) {
+				if (GUILayout.Button("再解析", EditorStyles.toolbarButton, GUILayout.Width(70f))) {
+					RefreshUsage();
+				}
+			}
+		}
+
+		if (_isScanning) {
+			EditorGUILayout.HelpBox("使用状況を解析しています…", MessageType.Info);
+			return;
+		}
+
+		if (_scanWasCanceled) {
+			EditorGUILayout.HelpBox("解析をキャンセルしました。取得済みの結果を表示しています。", MessageType.Warning);
+		}
+
+		EditorGUILayout.Space(6f);
+		EditorGUILayout.LabelField("使用シーン", EditorStyles.boldLabel);
+		if (_sceneUsages.Count == 0) {
+			EditorGUILayout.HelpBox("シーン内の使用オブジェクトは見つかりませんでした。", MessageType.Info);
+			return;
+		}
+
+		_scrollPosition = EditorGUILayout.BeginScrollView(_scrollPosition);
+		foreach (var usage in _sceneUsages) {
+			DrawSceneUsage(usage);
+		}
+		EditorGUILayout.EndScrollView();
+	}
+
+	private static void DrawSceneUsage(SceneUsage usage) {
+		using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox)) {
+			var sceneAsset = AssetDatabase.LoadAssetAtPath<SceneAsset>(usage.ScenePath);
+			using (new EditorGUILayout.HorizontalScope()) {
+				EditorGUILayout.LabelField(Path.GetFileNameWithoutExtension(usage.ScenePath), EditorStyles.boldLabel);
+				GUILayout.FlexibleSpace();
+				if (sceneAsset != null && GUILayout.Button("選択", GUILayout.Width(52f))) {
+					Selection.activeObject = sceneAsset;
+					EditorGUIUtility.PingObject(sceneAsset);
+				}
+			}
+
+			EditorGUILayout.LabelField(usage.ScenePath, EditorStyles.miniLabel);
+			if (usage.ObjectPaths.Count == 0) {
+				EditorGUILayout.LabelField("  └ シーン設定または間接参照", EditorStyles.miniLabel);
+				return;
+			}
+
+			foreach (var objectPath in usage.ObjectPaths) {
+				EditorGUILayout.SelectableLabel("  └ " + objectPath, EditorStyles.label,
+					GUILayout.Height(EditorGUIUtility.singleLineHeight));
+			}
+		}
+	}
+
+	private void RefreshUsage() {
+		if (this == null || _targetAsset == null || _isScanning) {
+			return;
+		}
+
+		_isScanning = true;
+		_scanWasCanceled = false;
+		_sceneUsages.Clear();
+		Repaint();
+
+		try {
+			for (var index = 0; index < _candidateScenePaths.Count; index++) {
+				var scenePath = _candidateScenePaths[index];
+				if (EditorUtility.DisplayCancelableProgressBar("Asset Usage",
+					    $"{scenePath} ({index + 1}/{_candidateScenePaths.Count})",
+					    (float)index / Mathf.Max(1, _candidateScenePaths.Count))) {
+					_scanWasCanceled = true;
+					break;
+				}
+
+				var usage = ScanScene(scenePath, _targetAsset, _targetAssetPath,
+					_matchReferencedAssetDependencies);
+				if (usage != null) {
+					_sceneUsages.Add(usage);
+				}
+			}
+		} finally {
+			EditorUtility.ClearProgressBar();
+			_isScanning = false;
+			Repaint();
+		}
+	}
+
+	private static SceneUsage ScanScene(string scenePath, UnityEngine.Object targetAsset, string targetAssetPath,
+		bool matchReferencedAssetDependencies) {
+		var scene = SceneManager.GetSceneByPath(scenePath);
+		var closePreviewScene = !scene.IsValid() || !scene.isLoaded;
+		if (closePreviewScene) {
+			try {
+				scene = EditorSceneManager.OpenPreviewScene(scenePath);
+			} catch (Exception exception) {
+				Debug.LogWarning($"Asset Usage: シーンを読み込めませんでした: {scenePath}\n{exception.Message}");
+				return null;
+			}
+		}
+
+		try {
+			var usage = new SceneUsage { ScenePath = scenePath };
+			var uniquePaths = new HashSet<string>(StringComparer.Ordinal);
+			var dependencyCache = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+			foreach (var root in scene.GetRootGameObjects()) {
+				CollectUsage(root.transform, targetAsset, targetAssetPath, matchReferencedAssetDependencies,
+					uniquePaths, dependencyCache);
+			}
+
+			usage.ObjectPaths.AddRange(uniquePaths);
+			usage.ObjectPaths.Sort(StringComparer.OrdinalIgnoreCase);
+			return usage;
+		} finally {
+			if (closePreviewScene && scene.IsValid()) {
+				EditorSceneManager.ClosePreviewScene(scene);
+			}
+		}
+	}
+
+	private static void CollectUsage(Transform transform, UnityEngine.Object targetAsset, string targetAssetPath,
+		bool matchReferencedAssetDependencies, HashSet<string> objectPaths,
+		Dictionary<string, bool> dependencyCache) {
+		if (GameObjectUsesAsset(transform.gameObject, targetAsset, targetAssetPath,
+			    matchReferencedAssetDependencies, dependencyCache)) {
+			objectPaths.Add(GetHierarchyPath(transform));
+		}
+
+		for (var childIndex = 0; childIndex < transform.childCount; childIndex++) {
+			CollectUsage(transform.GetChild(childIndex), targetAsset, targetAssetPath,
+				matchReferencedAssetDependencies, objectPaths, dependencyCache);
+		}
+	}
+
+	private static bool GameObjectUsesAsset(GameObject gameObject, UnityEngine.Object targetAsset,
+		string targetAssetPath, bool matchReferencedAssetDependencies, Dictionary<string, bool> dependencyCache) {
+		var nearestPrefabRoot = PrefabUtility.GetNearestPrefabInstanceRoot(gameObject);
+		if (nearestPrefabRoot == gameObject && string.Equals(
+			    PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(gameObject), targetAssetPath,
+			    StringComparison.OrdinalIgnoreCase)) {
+			return true;
+		}
+
+		foreach (var component in gameObject.GetComponents<Component>()) {
+			if (component == null) {
+				continue;
+			}
+
+			try {
+				var serializedObject = new SerializedObject(component);
+				var property = serializedObject.GetIterator();
+				while (property.Next(true)) {
+					if (property.propertyType == SerializedPropertyType.ObjectReference &&
+					    ReferencedObjectUsesAsset(property.objectReferenceValue, targetAsset, targetAssetPath,
+						    matchReferencedAssetDependencies, dependencyCache)) {
+						return true;
+					}
+				}
+			} catch (Exception exception) {
+				Debug.LogWarning($"Asset Usage: {GetHierarchyPath(gameObject.transform)} の " +
+				                 $"{component.GetType().Name} を解析できませんでした。\n{exception.Message}");
+			}
+		}
+
+		return false;
+	}
+
+	private static bool ReferencedObjectUsesAsset(UnityEngine.Object referencedObject,
+		UnityEngine.Object targetAsset, string targetAssetPath, bool matchReferencedAssetDependencies,
+		Dictionary<string, bool> dependencyCache) {
+		if (referencedObject == null) {
+			return false;
+		}
+
+		if (referencedObject == targetAsset ||
+		    targetAsset is Shader shader && referencedObject is Material material && material.shader == shader) {
+			return true;
+		}
+
+		var referencedPath = AssetDatabase.GetAssetPath(referencedObject);
+		if (string.IsNullOrEmpty(referencedPath)) {
+			return false;
+		}
+
+		if (string.Equals(referencedPath, targetAssetPath, StringComparison.OrdinalIgnoreCase)) {
+			return true;
+		}
+
+		if (!matchReferencedAssetDependencies ||
+		    referencedPath.EndsWith(".unity", StringComparison.OrdinalIgnoreCase)) {
+			return false;
+		}
+
+		if (!dependencyCache.TryGetValue(referencedPath, out var usesAsset)) {
+			usesAsset = Array.Exists(AssetDatabase.GetDependencies(referencedPath, true),
+				dependencyPath => string.Equals(dependencyPath, targetAssetPath, StringComparison.OrdinalIgnoreCase));
+			dependencyCache.Add(referencedPath, usesAsset);
+		}
+
+		return usesAsset;
+	}
+
+	private static string GetHierarchyPath(Transform transform) {
+		var path = transform.name;
+		while (transform.parent != null) {
+			transform = transform.parent;
+			path = transform.name + "/" + path;
+		}
+
+		return path;
 	}
 }

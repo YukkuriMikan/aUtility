@@ -41,6 +41,7 @@ public class ModelBrowser : AssetBrowserWindow<ModelBrowser.Entry, ModelBrowser.
 	protected override string ExportFavoritesDialogTitle => "Export Favorite Models";
 	protected override string ExportFavoritesDefaultFileName => "ModelFavorites.unitypackage";
 	protected override string ExportFavoritesEmptyMessage => "お気に入りに登録されたモデルがありません。";
+	protected override bool SupportsSceneUsage => true;
 
 	[MenuItem("Tools/Model Browser")]
 	private static void OpenWindow() {
